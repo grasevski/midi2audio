@@ -10,14 +10,12 @@ use arduino_hal::{
     },
     pins, Adc, Peripherals, Spi,
 };
-use arrayvec::ArrayVec;
 use avr_device::{asm, interrupt};
 use core::cell::RefCell;
 use embedded_hal::spi::FullDuplex;
 use panic_halt as _;
 
-/// Max number of bytes that can be pending for midi.
-const BUFSIZ: usize = 4;
+mod midi;
 
 /// Interface with the audio out DAC.
 static SPI: interrupt::Mutex<RefCell<Option<Spi>>> = interrupt::Mutex::new(RefCell::new(None));
@@ -26,13 +24,11 @@ static SPI: interrupt::Mutex<RefCell<Option<Spi>>> = interrupt::Mutex::new(RefCe
 static SERIAL: interrupt::Mutex<RefCell<Option<Usart0<MHz16>>>> =
     interrupt::Mutex::new(RefCell::new(None));
 
-/// Midi input message buffer.
-static MIDI_IN: interrupt::Mutex<RefCell<ArrayVec<u8, BUFSIZ>>> =
-    interrupt::Mutex::new(RefCell::new(ArrayVec::new_const()));
+/// Midi input FIFO message buffer.
+static MIDI_IN: interrupt::Mutex<RefCell<midi::Buf>> = interrupt::Mutex::new(RefCell::new(midi::Buf::new_const()));
 
-/// Midi output message buffer.
-static MIDI_OUT: interrupt::Mutex<RefCell<ArrayVec<u8, BUFSIZ>>> =
-    interrupt::Mutex::new(RefCell::new(ArrayVec::new_const()));
+/// Midi output LIFO message buffer.
+static MIDI_OUT: interrupt::Mutex<RefCell<midi::Buf>> = interrupt::Mutex::new(RefCell::new(midi::Buf::new_const()));
 
 /// Audio output least significant byte.
 static AUDIO_OUT: interrupt::Mutex<RefCell<Option<u8>>> = interrupt::Mutex::new(RefCell::new(None));
@@ -104,47 +100,43 @@ fn main() -> ! {
         SERIAL.borrow(cs).replace(Some(serial));
     });
     unsafe { interrupt::enable() };
-    let mut synth = Synth::new();
+    let mut synth = Synth::default();
+    let (mut audio_out, mut midi_out) = ((0, 0), midi::Msg::default());
     loop {
         while let Ok(audio_in) = adc.read_nonblocking(&a0) {
-            let midi_in: ArrayVec<_, BUFSIZ> =
-                interrupt::free(|cs| MIDI_IN.borrow(cs).borrow_mut().drain(..).collect());
-            let (audio_out, midi_out) = synth.step(audio_in, midi_in.into_iter());
-            interrupt::free(|cs| {
+            let midi_in: midi::Buf = interrupt::free(|cs| {
                 let mut spi = SPI.borrow(cs).borrow_mut();
                 let _ = spi.as_mut().unwrap().send(audio_out.0);
                 *AUDIO_OUT.borrow(cs).borrow_mut() = Some(audio_out.1);
-                if midi_out.is_empty() {
-                    return;
+                if !midi_out.is_empty() {
+                    let mut serial = SERIAL.borrow(cs).borrow_mut();
+                    serial.as_mut().unwrap().write_byte(midi_out[0]);
+                    let mut midi = MIDI_OUT.borrow(cs).borrow_mut();
+                    for &byte in midi_out[1..].iter().rev() {
+                        midi.push(byte);
+                    }
                 }
-                let mut serial = SERIAL.borrow(cs).borrow_mut();
-                serial.as_mut().unwrap().write_byte(midi_out[0]);
-                let mut midi = MIDI_OUT.borrow(cs).borrow_mut();
-                for &byte in midi_out[1..].iter().rev() {
-                    midi.push(byte);
-                }
+                MIDI_IN.borrow(cs).borrow_mut().drain(..).collect()
             });
+            let (audio, midi) = synth.step(audio_in, &midi_in);
+            audio_out = audio;
+            midi_out = midi;
         }
         asm::sleep();
     }
 }
 
 /// Digital signal processor.
-struct Synth {}
+#[derive(Default)]
+struct Synth { state: u8}
 
 impl Synth {
-    /// Initializes the state machine.
-    const fn new() -> Self {
-        Self {}
-    }
-
     /// Currently just maps the audio in to out.
-    fn step(
-        &mut self,
-        audio_in: u16,
-        _midi_in: impl Iterator<Item = u8>,
-    ) -> ((u8, u8), ArrayVec<u8, BUFSIZ>) {
-        let [a, b] = (audio_in << 6).to_be_bytes();
-        ((a, b), ArrayVec::new_const())
+    fn step(&mut self, audio_in: u16, _midi_in: &midi::Buf) -> ((u8, u8), midi::Msg) {
+        Default::default()
+        //self.state += 1;
+        //((self.state, 0), Default::default())
+        //let [a, b] = (audio_in << 6).to_be_bytes();
+        //((a, b), Default::default())
     }
 }
