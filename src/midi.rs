@@ -39,14 +39,18 @@ impl From<Midi> for Msg {
     fn from(msg: Midi) -> Msg {
         let mut out = Msg::default();
         out.push(msg.status);
-        out.try_extend_from_slice(&msg.data[0..Status::len(msg.status)]).unwrap();
+        out.try_extend_from_slice(&msg.data[0..Status::len(msg.status)])
+            .unwrap();
         out
     }
 }
 
 impl From<u8> for Midi {
     fn from(status: u8) -> Self {
-        Self { status, data: Default::default() }
+        Self {
+            status,
+            data: Default::default(),
+        }
     }
 }
 

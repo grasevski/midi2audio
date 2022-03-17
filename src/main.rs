@@ -8,10 +8,13 @@ use arduino_hal::{
         clock::MHz16,
         usart::{Event, Usart0},
     },
-    pins, prelude::*, Adc, Peripherals,
+    pins,
+    prelude::*,
+    Adc, Peripherals,
 };
 use avr_device::{asm::sleep, interrupt};
-use core::{cell::RefCell, convert::TryInto, convert::TryFrom};
+use core::{cell::RefCell, convert::TryInto};
+use embedded_hal::serial::Read;
 use panic_halt as _;
 
 mod midi;
@@ -21,39 +24,52 @@ static SERIAL: interrupt::Mutex<RefCell<Option<Usart0<MHz16>>>> =
     interrupt::Mutex::new(RefCell::new(None));
 
 /// Midi input FIFO message buffer.
-static MIDI_IN: interrupt::Mutex<RefCell<midi::Buf>> = interrupt::Mutex::new(RefCell::new(midi::Buf::new_const()));
+static MIDI_IN: interrupt::Mutex<RefCell<midi::Buf>> =
+    interrupt::Mutex::new(RefCell::new(midi::Buf::new_const()));
 
 /// Midi output LIFO message buffer.
-static MIDI_OUT: interrupt::Mutex<RefCell<midi::Buf>> = interrupt::Mutex::new(RefCell::new(midi::Buf::new_const()));
+static MIDI_OUT: interrupt::Mutex<RefCell<midi::Buf>> =
+    interrupt::Mutex::new(RefCell::new(midi::Buf::new_const()));
 
 /// Wakes up the main loop when the audio input has been read.
 #[interrupt(atmega328p)]
 #[allow(non_snake_case)]
 fn ADC() {}
 
+/// Reads the next midi input byte when ready.
+#[interrupt(atmega328p)]
+#[allow(non_snake_case)]
+fn USART_RX() {
+    usart_rx()
+}
+
 /// Grabs the next midi input byte.
-//#[interrupt(atmega328p)]
-//#[allow(non_snake_case)]
-//fn USART_RX() {
-//    interrupt::free(|cs| {
-//        let mut serial = SERIAL.borrow(cs).borrow_mut();
-//        let mut midi_in = MIDI_IN.borrow(cs).borrow_mut();
-//        midi_in.push(serial.as_mut().unwrap().read_byte());
-//    });
-//}
+fn usart_rx() {
+    interrupt::free(|cs| {
+        let mut serial = SERIAL.borrow(cs).borrow_mut();
+        if let Ok(data) = serial.as_mut().unwrap().read() {
+            MIDI_IN.borrow(cs).borrow_mut().push(data);
+        }
+    });
+}
+
+/// Writes the next midi output byte when ready.
+#[interrupt(atmega328p)]
+#[allow(non_snake_case)]
+fn USART_UDRE() {
+    usart_udre()
+}
 
 /// Sends the next midi output byte.
-//#[interrupt(atmega328p)]
-//#[allow(non_snake_case)]
-//fn USART_UDRE() {
-//    interrupt::free(|cs| {
-//        let mut midi_out = MIDI_OUT.borrow(cs).borrow_mut();
-//        if let Some(data) = midi_out.pop() {
-//            let mut serial = SERIAL.borrow(cs).borrow_mut();
-//            serial.as_mut().unwrap().write_byte(data);
-//        }
-//    });
-//}
+fn usart_udre() {
+    interrupt::free(|cs| {
+        let mut midi_out = MIDI_OUT.borrow(cs).borrow_mut();
+        if let Some(data) = midi_out.pop() {
+            let mut serial = SERIAL.borrow(cs).borrow_mut();
+            //serial.as_mut().unwrap().write_byte(data);
+        }
+    });
+}
 
 /// Loops over audio input and maps to output.
 #[entry]
@@ -76,21 +92,21 @@ fn main() -> ! {
     //let mut serial = default_serial!(dp, pins, 31250);
     //serial.listen(Event::RxComplete);
     //serial.listen(Event::DataRegisterEmpty);
-    let mut serial = arduino_hal::default_serial!(dp, pins, 57600);
-    //interrupt::free(|cs| SERIAL.borrow(cs).replace(Some(serial)));
+    let mut serial = default_serial!(dp, pins, 57600);
+    interrupt::free(|cs| SERIAL.borrow(cs).replace(Some(serial)));
     unsafe { interrupt::enable() };
     let (mut synth, mut midi_out) = (Synth::default(), midi::Msg::default());
     loop {
         while let Ok(audio_in) = adc.read_nonblocking(&a0) {
             let midi_in: midi::Buf = interrupt::free(|cs| {
-                //if !midi_out.is_empty() {
-                //    let mut serial = SERIAL.borrow(cs).borrow_mut();
-                //    serial.as_mut().unwrap().write_byte(midi_out[0]);
-                //    let mut midi = MIDI_OUT.borrow(cs).borrow_mut();
-                //    for &byte in midi_out[1..].iter().rev() {
-                //        midi.push(byte);
-                //    }
-                //}
+                if !midi_out.is_empty() {
+                    let mut serial = SERIAL.borrow(cs).borrow_mut();
+                    serial.as_mut().unwrap().write_byte(midi_out[0]);
+                    let mut midi = MIDI_OUT.borrow(cs).borrow_mut();
+                    for &byte in midi_out[1..].iter().rev() {
+                        midi.push(byte);
+                    }
+                }
                 MIDI_IN.borrow(cs).borrow_mut().drain(..).collect()
             });
             let (audio, midi) = synth.step(audio_in, &midi_in);
@@ -98,13 +114,17 @@ fn main() -> ! {
             //ufmt::uwriteln!(&mut serial, "data: {}\r", audio_in);
             midi_out = midi;
         }
+        usart_rx();
+        usart_udre();
         sleep();
     }
 }
 
 /// Digital signal processor.
 #[derive(Default)]
-struct Synth { state: u8}
+struct Synth {
+    state: u8,
+}
 
 impl Synth {
     /// Currently just maps the audio in to out.
