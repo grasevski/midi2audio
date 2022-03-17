@@ -122,9 +122,7 @@ fn main() -> ! {
 
 /// Digital signal processor.
 #[derive(Default)]
-struct Synth {
-    state: u8,
-}
+struct Synth {}
 
 impl Synth {
     /// Currently just maps the audio in to out.
