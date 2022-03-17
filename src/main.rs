@@ -129,17 +129,6 @@ struct Synth {
 impl Synth {
     /// Currently just maps the audio in to out.
     fn step(&mut self, audio_in: u16, _midi_in: &midi::Buf) -> (u8, midi::Msg) {
-        //Default::default()
-        //(0, Default::default())
-        //self.state = if self.state == 0 { 255 } else { 0 };
-        //self.state = self.state.wrapping_add(1);
-        //(if self.state < 128 { 0 } else { 255 }, Default::default())
-        //((self.state >> 7) + 127, Default::default())
-        //let [a, b] = (audio_in << 6).to_be_bytes();
-        //((a, b), Default::default())
-        //let state = 1 * u16::from(self.state) + (audio_in >> 3);
-        //self.state = (state >> 1).try_into().unwrap();
-        //(self.state, Default::default())
         ((audio_in >> 2).try_into().unwrap(), Default::default())
     }
 }
