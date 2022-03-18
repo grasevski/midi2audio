@@ -14,7 +14,6 @@ use arduino_hal::{
 };
 use avr_device::{asm::sleep, interrupt};
 use core::{cell::RefCell, convert::TryInto};
-use embedded_hal::serial::Read;
 use panic_halt as _;
 
 mod midi;
@@ -36,32 +35,21 @@ static MIDI_OUT: interrupt::Mutex<RefCell<midi::Buf>> =
 #[allow(non_snake_case)]
 fn ADC() {}
 
-/// Reads the next midi input byte when ready.
+/// Grabs the next midi input byte.
 #[interrupt(atmega328p)]
 #[allow(non_snake_case)]
 fn USART_RX() {
-    usart_rx()
-}
-
-/// Grabs the next midi input byte.
-fn usart_rx() {
     interrupt::free(|cs| {
         let mut serial = SERIAL.borrow(cs).borrow_mut();
-        if let Ok(data) = serial.as_mut().unwrap().read() {
-            MIDI_IN.borrow(cs).borrow_mut().push(data);
-        }
+        let data = serial.as_mut().unwrap().read_byte();
+        MIDI_IN.borrow(cs).borrow_mut().push(data);
     });
 }
 
-/// Writes the next midi output byte when ready.
+/// Sends the next midi output byte.
 #[interrupt(atmega328p)]
 #[allow(non_snake_case)]
 fn USART_UDRE() {
-    usart_udre()
-}
-
-/// Sends the next midi output byte.
-fn usart_udre() {
     interrupt::free(|cs| {
         let mut midi_out = MIDI_OUT.borrow(cs).borrow_mut();
         if let Some(data) = midi_out.pop() {
@@ -114,8 +102,6 @@ fn main() -> ! {
             //ufmt::uwriteln!(&mut serial, "data: {}\r", audio_in);
             midi_out = midi;
         }
-        usart_rx();
-        usart_udre();
         sleep();
     }
 }
