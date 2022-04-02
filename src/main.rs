@@ -8,27 +8,29 @@ use arduino_hal::{
         clock::MHz16,
         usart::{Event, Usart0},
     },
-    pins,
-    prelude::*,
-    Adc, Peripherals,
+    pins, Adc, Peripherals,
 };
+use arrayvec::ArrayVec;
 use avr_device::{asm::sleep, interrupt};
-use core::{cell::RefCell, convert::TryInto};
+use core::{cell::RefCell, cmp::min, convert::TryFrom};
+//use embedded_hal::serial::Read;
 use panic_halt as _;
+use wmidi::{FromBytesError, MidiMessage};
 
-mod midi;
+/// Midi bytes are buffered while DSP is happening.
+type Midi = ArrayVec<u8, 4>;
 
 /// Midi interface.
 static SERIAL: interrupt::Mutex<RefCell<Option<Usart0<MHz16>>>> =
     interrupt::Mutex::new(RefCell::new(None));
 
 /// Midi input FIFO message buffer.
-static MIDI_IN: interrupt::Mutex<RefCell<midi::Buf>> =
-    interrupt::Mutex::new(RefCell::new(midi::Buf::new_const()));
+static MIDI_IN: interrupt::Mutex<RefCell<Midi>> =
+    interrupt::Mutex::new(RefCell::new(Midi::new_const()));
 
 /// Midi output LIFO message buffer.
-static MIDI_OUT: interrupt::Mutex<RefCell<midi::Buf>> =
-    interrupt::Mutex::new(RefCell::new(midi::Buf::new_const()));
+static MIDI_OUT: interrupt::Mutex<RefCell<Midi>> =
+    interrupt::Mutex::new(RefCell::new(Midi::new_const()));
 
 /// Wakes up the main loop when the audio input has been read.
 #[interrupt(atmega328p)]
@@ -54,7 +56,7 @@ fn USART_UDRE() {
         let mut midi_out = MIDI_OUT.borrow(cs).borrow_mut();
         if let Some(data) = midi_out.pop() {
             let mut serial = SERIAL.borrow(cs).borrow_mut();
-            //serial.as_mut().unwrap().write_byte(data);
+            serial.as_mut().unwrap().write_byte(data);
         }
     });
 }
@@ -80,27 +82,31 @@ fn main() -> ! {
     //let mut serial = default_serial!(dp, pins, 31250);
     //serial.listen(Event::RxComplete);
     //serial.listen(Event::DataRegisterEmpty);
-    let mut serial = default_serial!(dp, pins, 57600);
-    interrupt::free(|cs| SERIAL.borrow(cs).replace(Some(serial)));
+    //let mut serial = default_serial!(dp, pins, 57600);
+    //interrupt::free(|cs| SERIAL.borrow(cs).replace(Some(serial)));
     unsafe { interrupt::enable() };
-    let (mut synth, mut midi_out) = (Synth::default(), midi::Msg::default());
+    let (mut synth, mut _midi_out) = (Synth::default(), Midi::new_const());
     loop {
         while let Ok(audio_in) = adc.read_nonblocking(&a0) {
-            let midi_in: midi::Buf = interrupt::free(|cs| {
-                if !midi_out.is_empty() {
-                    let mut serial = SERIAL.borrow(cs).borrow_mut();
-                    serial.as_mut().unwrap().write_byte(midi_out[0]);
-                    let mut midi = MIDI_OUT.borrow(cs).borrow_mut();
-                    for &byte in midi_out[1..].iter().rev() {
-                        midi.push(byte);
-                    }
-                }
-                MIDI_IN.borrow(cs).borrow_mut().drain(..).collect()
+            let midi_in: Midi = interrupt::free(|cs| {
+                //let mut serial = SERIAL.borrow(cs).borrow_mut();
+                //if !midi_out.is_empty() {
+                //    serial.as_mut().unwrap().write_byte(midi_out[0]);
+                //    let mut midi = MIDI_OUT.borrow(cs).borrow_mut();
+                //    for &byte in midi_out[1..].iter().rev() {
+                //        midi.push(byte);
+                //    }
+                //}
+                let mut midi = MIDI_IN.borrow(cs).borrow_mut();
+                //while let Ok(byte) = serial.as_mut().unwrap().read() {
+                //    midi.push(byte);
+                //}
+                midi.drain(..).collect()
             });
-            let (audio, midi) = synth.step(audio_in, &midi_in);
+            let (audio, _midi) = synth.step(audio_in, &midi_in);
             tc0.ocr0b.write(|w| unsafe { w.bits(audio) });
             //ufmt::uwriteln!(&mut serial, "data: {}\r", audio_in);
-            midi_out = midi;
+            //midi_out = midi;
         }
         sleep();
     }
@@ -108,11 +114,71 @@ fn main() -> ! {
 
 /// Digital signal processor.
 #[derive(Default)]
-struct Synth {}
+struct Synth {
+    controller: MidiController,
+    synth: WavetableSynth,
+    midi: ArrayVec<u8, 3>,
+}
 
 impl Synth {
-    /// Currently just maps the audio in to out.
-    fn step(&mut self, audio_in: u16, _midi_in: &midi::Buf) -> (u8, midi::Msg) {
-        ((audio_in >> 2).try_into().unwrap(), Default::default())
+    /// Converts midi and audio to midi and audio.
+    fn step(&mut self, audio_in: u16, midi_in: &Midi) -> (u8, Midi) {
+        let mut i = 0;
+        while i < midi_in.len() {
+            let j = min(self.midi.remaining_capacity(), midi_in.len() - i);
+            self.midi.try_extend_from_slice(&midi_in[i..j]).unwrap();
+            match MidiMessage::try_from(&self.midi[..]) {
+                Ok(midi) => {
+                    self.synth.read(&midi);
+                    self.midi.clear();
+                    i = j;
+                }
+                Err(err) => match err {
+                    FromBytesError::NoBytes => {
+                        break;
+                    }
+                    FromBytesError::NotEnoughBytes => {
+                        break;
+                    }
+                    _ => {
+                        self.midi.remove(0);
+                        i = j;
+                    }
+                },
+            }
+        }
+        let mut midi_out = Midi::default();
+        if let Some(midi) = self.controller.step(audio_in) {
+            unsafe {
+                midi_out.set_len(self.midi.capacity());
+            }
+            midi.copy_to_slice(&mut midi_out[..]).unwrap();
+        }
+        (self.synth.step(), midi_out)
+    }
+}
+
+/// TODO Converts midi to audio.
+#[derive(Default)]
+struct WavetableSynth {}
+
+impl WavetableSynth {
+    /// TODO Parses a midi event.
+    fn read(&mut self, _msg: &MidiMessage) {}
+
+    /// TODO Generates the next audio value.
+    fn step(&mut self) -> u8 {
+        0
+    }
+}
+
+/// TODO Converts audio to midi.
+#[derive(Default)]
+struct MidiController {}
+
+impl MidiController {
+    /// TODO Generates the next midi event.
+    fn step(&mut self, _audio_in: u16) -> Option<MidiMessage> {
+        None
     }
 }
