@@ -1,0 +1,15 @@
+[package]
+name = "synth"
+version = "0.1.0"
+authors = ["Nicholas Grasevski <grasevski@gmail.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+arrayvec = { version = "0.7.2", default-features = false }
+wmidi = { version = "4.0.6", default-features = false }
+
+[features]
+default = ["std"]
+std = []

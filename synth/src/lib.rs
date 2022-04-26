@@ -1,128 +1,39 @@
-//! Arduino synthesizer.
-#![no_std]
-#![no_main]
-#![feature(abi_avr_interrupt)]
-#![feature(const_fn_floating_point_arithmetic)]
-use arduino_hal::{
-    default_serial, entry,
-    hal::{
-        clock::MHz16,
-        usart::{Event, Usart0},
-    },
-    pins, Adc, Peripherals,
-};
+//! Synthesizer unit testable logic.
+#![cfg_attr(not(feature = "std"), no_std)]
 use arrayvec::ArrayVec;
-use avr_device::{asm::sleep, interrupt};
 use core::{
-    cell::RefCell,
-    cmp::min,
+    cmp::{max, min},
     convert::{TryFrom, TryInto},
 };
-//use embedded_hal::serial::Read;
-use panic_halt as _;
 use wmidi::{Channel, FromBytesError, MidiMessage, PitchBend, ProgramNumber, Velocity};
 
+mod lookup;
+
 /// Midi bytes are buffered while DSP is happening.
-type Midi = ArrayVec<u8, 4>;
-
-/// Midi interface.
-static SERIAL: interrupt::Mutex<RefCell<Option<Usart0<MHz16>>>> =
-    interrupt::Mutex::new(RefCell::new(None));
-
-/// Midi input FIFO message buffer.
-static MIDI_IN: interrupt::Mutex<RefCell<Midi>> =
-    interrupt::Mutex::new(RefCell::new(Midi::new_const()));
-
-/// Midi output LIFO message buffer.
-static MIDI_OUT: interrupt::Mutex<RefCell<Midi>> =
-    interrupt::Mutex::new(RefCell::new(Midi::new_const()));
+pub type Midi = ArrayVec<u8, 4>;
 
 /// ADC midpoint reading.
 const MIDPOINT: u16 = 512;
 
-/// Wakes up the main loop when the audio input has been read.
-#[interrupt(atmega328p)]
-#[allow(non_snake_case)]
-fn ADC() {}
-
-/// Grabs the next midi input byte.
-#[interrupt(atmega328p)]
-#[allow(non_snake_case)]
-fn USART_RX() {
-    interrupt::free(|cs| {
-        let mut serial = SERIAL.borrow(cs).borrow_mut();
-        let data = serial.as_mut().unwrap().read_byte();
-        MIDI_IN.borrow(cs).borrow_mut().push(data);
-    });
+/// Generates the frequency to pitch mapping.
+#[cfg(feature = "std")]
+pub fn lookup_notes() -> [i16; Note::NUM_NOTES] {
+    let ret: ArrayVec<_, { Note::NUM_NOTES }> = (0..Note::NUM_NOTES).map(Note::lookup).collect();
+    ret.into_inner().unwrap()
 }
 
-/// Sends the next midi output byte.
-#[interrupt(atmega328p)]
-#[allow(non_snake_case)]
-fn USART_UDRE() {
-    interrupt::free(|cs| {
-        let mut midi_out = MIDI_OUT.borrow(cs).borrow_mut();
-        if let Some(data) = midi_out.pop() {
-            let mut serial = SERIAL.borrow(cs).borrow_mut();
-            serial.as_mut().unwrap().write_byte(data);
-        }
-    });
-}
-
-/// Loops over audio input and maps to output.
-#[entry]
-fn main() -> ! {
-    let dp = Peripherals::take().unwrap();
-    dp.ADC.adcsra.write(|w| w.adie().set_bit());
-    let pins = pins!(dp);
-    pins.d5.into_output();
-    pins.d6.into_output();
-    let tc0 = dp.TC0;
-    tc0.tccr0a.write(|w| {
-        w.com0a().match_clear();
-        w.com0b().match_clear();
-        w.wgm0().pwm_phase()
-    });
-    tc0.tccr0b.write(|w| w.cs0().direct());
-    tc0.ocr0a.write(|w| unsafe { w.bits(128) });
-    let mut adc = Adc::new(dp.ADC, Default::default());
-    let a0 = pins.a0.into_analog_input(&mut adc);
-    //let mut serial = default_serial!(dp, pins, 31250);
-    //serial.listen(Event::RxComplete);
-    //serial.listen(Event::DataRegisterEmpty);
-    //let mut serial = default_serial!(dp, pins, 57600);
-    //interrupt::free(|cs| SERIAL.borrow(cs).replace(Some(serial)));
-    unsafe { interrupt::enable() };
-    let (mut synth, mut _midi_out) = (Synth::default(), Midi::new_const());
-    loop {
-        while let Ok(audio_in) = adc.read_nonblocking(&a0) {
-            let midi_in: Midi = interrupt::free(|cs| {
-                //let mut serial = SERIAL.borrow(cs).borrow_mut();
-                //if !midi_out.is_empty() {
-                //    serial.as_mut().unwrap().write_byte(midi_out[0]);
-                //    let mut midi = MIDI_OUT.borrow(cs).borrow_mut();
-                //    for &byte in midi_out[1..].iter().rev() {
-                //        midi.push(byte);
-                //    }
-                //}
-                let mut midi = MIDI_IN.borrow(cs).borrow_mut();
-                //while let Ok(byte) = serial.as_mut().unwrap().read() {
-                //    midi.push(byte);
-                //}
-                midi.drain(..).collect()
-            });
-            let (audio, _midi) = synth.step(audio_in, &midi_in);
-            tc0.ocr0b.write(|w| unsafe { w.bits(audio) });
-            //ufmt::uwriteln!(&mut serial, "data: {}\r", audio_in);
-            //midi_out = midi;
-        }
-        sleep();
-    }
+/// Generates the pitch to wavelength mapping.
+#[cfg(feature = "std")]
+pub fn lookup_wavelengths() -> [i16; Note::NUM_WAVELENGTHS] {
+    let ret: ArrayVec<_, { Note::NUM_WAVELENGTHS }> = (0..Note::NUM_WAVELENGTHS)
+        .map(Note::lookup_wavelength)
+        .collect();
+    ret.into_inner().unwrap()
 }
 
 /// Digital signal processor.
 #[derive(Default)]
-struct Synth<'a> {
+pub struct Synth<'a> {
     /// Converts audio to midi.
     controller: MidiController<'a>,
 
@@ -135,7 +46,7 @@ struct Synth<'a> {
 
 impl Synth<'_> {
     /// Converts midi and audio to midi and audio.
-    fn step(&mut self, audio_in: u16, midi_in: &Midi) -> (u8, Midi) {
+    pub fn step(&mut self, audio_in: u16, midi_in: &Midi) -> (u8, Midi) {
         let mut i = 0;
         while i < midi_in.len() {
             let j = min(self.midi.remaining_capacity(), midi_in.len() - i);
@@ -174,9 +85,25 @@ impl Synth<'_> {
 /// Converts midi to audio.
 #[derive(Default)]
 struct SubtractiveSynth {
-    t: u16,
-    k: u16,
+    /// Time step within the sound wave.
+    t: i16,
+
+    /// Sound wave length.
+    k: i16,
+
+    /// Previous amplitude, for doing low pass filter.
+    p: i16,
+
+    /// The note to play.
+    note: Option<wmidi::Note>,
+
+    /// A microtonal adjustment to the note to play.
+    pitch_bend: PitchBend,
+
+    /// The selected musical instrument.
     program_number: ProgramNumber,
+
+    /// The volume of the note to play.
     velocity: Velocity,
 }
 
@@ -187,60 +114,101 @@ impl SubtractiveSynth {
             MidiMessage::NoteOff(channel, note, _) => {
                 if channel == Channel::Ch1 && Some(note) == self.note {
                     self.note = None;
+                    self.set_wavelength();
                 }
-            },
+            }
             MidiMessage::NoteOn(channel, note, velocity) => {
                 if channel == Channel::Ch1 {
                     self.note = Some(note);
+                    self.set_wavelength();
                     self.velocity = velocity;
                 }
-            },
+            }
             MidiMessage::PolyphonicKeyPressure(channel, note, velocity) => {
                 if channel == Channel::Ch1 && Some(note) == self.note {
                     self.velocity = velocity;
                 }
-            },
+            }
             MidiMessage::ProgramChange(channel, program_number) => {
                 if channel == Channel::Ch1 {
                     self.program_number = program_number;
                 }
-            },
+            }
             MidiMessage::ChannelPressure(channel, velocity) => {
                 if channel == Channel::Ch1 {
                     self.velocity = velocity;
                 }
-            },
+            }
             MidiMessage::PitchBendChange(channel, pitch_bend) => {
                 if channel == Channel::Ch1 {
                     self.pitch_bend = pitch_bend;
+                    self.set_wavelength();
                 }
-            },
+            }
             MidiMessage::Reset => {
                 *self = Default::default();
-            },
-            _ => {},
+            }
+            _ => {}
         }
     }
 
-    /// TODO Generates the next audio value.
+    /// Generates the next audio value.
     fn step(&mut self) -> u8 {
-        if let Some(note) = self.note {
+        self.p = if self.k == 0 {
+            0
+        } else {
+            let program_number = u8::from(self.program_number);
+            let wave = max(program_number & 0b111, 1);
+            const MAX_ALPHA: u8 = 16;
+            let a = i16::from(MAX_ALPHA - ((program_number >> 3) & 0b1111));
+            let v = ((i16::MAX - 1) >> 11) * a * i16::from(u8::from(self.velocity))
+                / i16::try_from(wave.count_ones()).unwrap();
+            let mut r = 0_i16;
+            if wave & 0b1 != 0 {
+                r += Self::square(self.t, self.k, v);
+            }
+            if wave & 0b10 != 0 {
+                r += Self::sawtooth(self.t, self.k, v);
+            }
+            if wave & 0b100 != 0 {
+                r += Self::triangle(self.t, self.k, v);
+            }
+            self.t = (self.t + 1) % self.k;
+            r + (i16::from(MAX_ALPHA) - a) * (self.p >> 4)
+        };
+        u8::try_from((self.p >> 9) + 128).unwrap()
+    }
+
+    /// Initializes the counter for iterating through the waveform.
+    fn set_wavelength(&mut self) {
+        self.t = 0;
+        self.k = if let Some(note) = self.note {
             let pitch = i16::from(u8::from(note)) << 3;
             let bend = i16::try_from(u16::from(self.pitch_bend) >> 11).unwrap();
-            let f = Note::PITCHES[usize::try_from(pitch + bend).unwrap()];
-            let program_number = u8::from(self.program_number);
-            let mut c = 0;
-            if program_number & 0b1 != 0 {
-                c += 1;
-            }
-            if program_number & 0b10 != 0 {
-                c += 1;
-            }
-            if program_number & 0b100 != 0 || c == 0 {
-                c += 1;
-            }
+            lookup::WAVELENGTHS[usize::try_from(pitch + bend).unwrap()]
+        } else {
+            0
         }
-        0
+    }
+
+    /// Alternates between min and max amplitude.
+    fn square(t: i16, k: i16, v: i16) -> i16 {
+        v * if (t << 1) < k { -1 } else { 1 }
+    }
+
+    /// A waveform resembling the teeth of a plain toothed saw.
+    fn sawtooth(t: i16, k: i16, v: i16) -> i16 {
+        (v / k) * ((t << 1) - k)
+    }
+
+    /// A piecwise linear triangle shaped waveform.
+    fn triangle(t: i16, k: i16, v: i16) -> i16 {
+        let x = if (t << 1) < k {
+            (t << 2) - k
+        } else {
+            k + (k >> 1) - (t << 2)
+        };
+        (v / k) * x
     }
 }
 
@@ -372,7 +340,7 @@ impl FrequencyTracker {
             Default::default()
         } else {
             let f = u16::from(self.k - 1) * (32768 / u16::from(self.f - self.i));
-            Note::try_from_frequency((f >> 2).into())
+            Note::try_from_frequency((f >> 1).into())
         }
     }
 }
@@ -388,8 +356,14 @@ struct Note {
 }
 
 impl Note {
+    /// Number of audio samples per second.
+    const NUM_SAMPLES: u16 = 8192;
+
     /// The number of distinct pitches that can be recognized.
-    const NUM_NOTES: usize = 4096;
+    const NUM_NOTES: usize = 8192;
+
+    /// The number of distinct wavelengths represented by midi notes.
+    const NUM_WAVELENGTHS: usize = 2048;
 
     /// The number of subdivisions per semitone.
     const NUM_BENDS: i16 = 8;
@@ -403,47 +377,48 @@ impl Note {
     /// Frequency of A.
     const BASE_FREQUENCY: f64 = 55.0;
 
-    /// A precomputed pitch mapping table.
-    const NOTES: [i16; Self::NUM_NOTES] = Self::lookup();
-
-    /// A precomputed frequency mapping table.
-    const PITCHES: [u16; Self::NUM_NOTES] = Self::lookup_pitch();
-
     /// Tries to convert a frequency to a note.
     fn try_from_frequency(f: usize) -> Option<Self> {
-        if f >= Self::NOTES.len() {
+        if f >= lookup::NOTES.len() {
             return None;
         }
-        let p = Self::NOTES[f];
+        let p = lookup::NOTES[f];
         if p < 0 {
             return None;
         }
         let p = u16::try_from(p).unwrap();
-        let pitch_bend = (8192 + ((p & 0b111) << 9)).try_into().unwrap();
-        let note = wmidi::Note::try_from(u8::from(Self::BASE_NOTE) + u8::try_from(p >> 3).unwrap()).unwrap();
+        let pitch_bend = (Self::NUM_SAMPLES + ((p & 0b1111) << 8))
+            .try_into()
+            .unwrap();
+        let note = wmidi::Note::try_from(u8::from(Self::BASE_NOTE) + u8::try_from(p >> 4).unwrap())
+            .unwrap();
         Some(Note { note, pitch_bend })
     }
 
-    /// Generates the frequency to pitch mapping.
-    const fn lookup() -> [i16; Self::NUM_NOTES] {
-        let mut ret = [0; Self::NUM_NOTES];
-        let mut i = 0;
-        while i < ret.len() {
-            ret[i] = (Self::DENOMINATOR * ((i as f64) / Self::BASE_FREQUENCY).log2()) as i16;
-            i += 1;
-        }
-        ret
+    /// Maps a given frequency to its pitch.
+    #[cfg(feature = "std")]
+    fn lookup(frequency: usize) -> i16 {
+        (Self::DENOMINATOR
+            * (f64::try_from(i16::try_from(frequency).unwrap()).unwrap() / Self::BASE_FREQUENCY)
+                .log2())
+        .round() as i16
     }
 
-    /// Generates the pitch to frequency mapping.
-    const fn lookup_pitch() -> [u16; Self::NUM_NOTES] {
-        let mut ret = [0; Self::NUM_NOTES];
-        let mut i = 0;
-        while i < ret.len() {
-            let p = (i as i16) - Self::NUM_BENDS * (Self::BASE_NOTE as i16);
-            ret[i] = (Self::BASE_FREQUENCY * ((p as f64) / Self::DENOMINATOR).exp2()) as u16;
-            i += 1;
-        }
-        ret
+    /// Maps a given pitch to its wavelength.
+    #[cfg(feature = "std")]
+    fn lookup_wavelength(pitch: usize) -> i16 {
+        let p =
+            i16::try_from(pitch).unwrap() - Self::NUM_BENDS * i16::from(u8::from(Self::BASE_NOTE));
+        (f64::try_from(Self::NUM_SAMPLES).unwrap()
+            / (Self::BASE_FREQUENCY * (f64::try_from(p).unwrap() / Self::DENOMINATOR).exp2()))
+        .round() as i16
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn it_works() {
+        assert_eq!(2 + 2, 4);
     }
 }
