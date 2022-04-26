@@ -359,6 +359,9 @@ impl Note {
     /// Number of audio samples per second.
     const NUM_SAMPLES: u16 = 8192;
 
+    /// Pitch bend neutral value.
+    const PITCH_OFFSET: u16 = 8192;
+
     /// The number of distinct pitches that can be recognized.
     const NUM_NOTES: usize = 8192;
 
@@ -387,7 +390,7 @@ impl Note {
             return None;
         }
         let p = u16::try_from(p).unwrap();
-        let pitch_bend = (Self::NUM_SAMPLES + ((p & 0b1111) << 8))
+        let pitch_bend = (Self::PITCH_OFFSET + ((p & 0b1111) << 9))
             .try_into()
             .unwrap();
         let note = wmidi::Note::try_from(u8::from(Self::BASE_NOTE) + u8::try_from(p >> 4).unwrap())
