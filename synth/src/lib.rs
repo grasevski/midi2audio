@@ -369,7 +369,7 @@ impl Note {
     const NUM_WAVELENGTHS: usize = 2048;
 
     /// The number of subdivisions per semitone.
-    const NUM_BENDS: i16 = 8;
+    const NUM_BENDS: i16 = 16;
 
     /// The number of subdivisions per octave.
     const DENOMINATOR: f64 = 12.0 * (Self::NUM_BENDS as f64);
@@ -378,7 +378,7 @@ impl Note {
     const BASE_NOTE: wmidi::Note = wmidi::Note::A0;
 
     /// Frequency of A.
-    const BASE_FREQUENCY: f64 = 55.0;
+    const BASE_FREQUENCY: f64 = 110.0;
 
     /// Tries to convert a frequency to a note.
     fn try_from_frequency(f: usize) -> Option<Self> {
