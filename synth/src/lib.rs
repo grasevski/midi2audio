@@ -183,8 +183,9 @@ impl SubtractiveSynth {
     fn set_wavelength(&mut self) {
         self.t = 0;
         self.k = if let Some(note) = self.note {
-            let pitch = i16::from(u8::from(note)) << 3;
-            let bend = i16::try_from(u16::from(self.pitch_bend) >> 11).unwrap();
+            let pitch = i16::from(u8::from(note)) << Note::LOG_NUM_BENDS;
+            let bend =
+                i16::try_from(u16::from(self.pitch_bend) >> (14 - Note::LOG_NUM_BENDS)).unwrap();
             lookup::WAVELENGTHS[usize::try_from(pitch + bend).unwrap()]
         } else {
             0
@@ -356,28 +357,29 @@ struct Note {
 }
 
 impl Note {
-    /// Number of audio samples per second.
-    const NUM_SAMPLES: u16 = 8192;
-
-    /// Pitch bend neutral value.
-    const PITCH_OFFSET: u16 = 8192;
-
     /// The number of distinct pitches that can be recognized.
+    #[cfg(feature = "std")]
     const NUM_NOTES: usize = 8192;
 
     /// The number of distinct wavelengths represented by midi notes.
+    #[cfg(feature = "std")]
     const NUM_WAVELENGTHS: usize = 2048;
 
+    /// Base 2 logarithm of the number of subdivisions per semitone.
+    const LOG_NUM_BENDS: u8 = 4;
+
     /// The number of subdivisions per semitone.
-    const NUM_BENDS: i16 = 16;
+    const NUM_BENDS: i16 = 1 << Self::LOG_NUM_BENDS;
 
     /// The number of subdivisions per octave.
+    #[cfg(feature = "std")]
     const DENOMINATOR: f64 = 12.0 * (Self::NUM_BENDS as f64);
 
     /// Tune everything with respect to A.
     const BASE_NOTE: wmidi::Note = wmidi::Note::A0;
 
     /// Frequency of A.
+    #[cfg(feature = "std")]
     const BASE_FREQUENCY: f64 = 110.0;
 
     /// Tries to convert a frequency to a note.
@@ -390,11 +392,14 @@ impl Note {
             return None;
         }
         let p = u16::try_from(p).unwrap();
-        let pitch_bend = (Self::PITCH_OFFSET + ((p & 0b1111) << 9))
+        let pitch_bend = (8192
+            + ((p & (Self::NUM_BENDS as u16 - 1)) << (12 - Self::LOG_NUM_BENDS)))
             .try_into()
             .unwrap();
-        let note = wmidi::Note::try_from(u8::from(Self::BASE_NOTE) + u8::try_from(p >> 4).unwrap())
-            .unwrap();
+        let note = wmidi::Note::try_from(
+            u8::from(Self::BASE_NOTE) + u8::try_from(p >> Self::LOG_NUM_BENDS).unwrap(),
+        )
+        .unwrap();
         Some(Note { note, pitch_bend })
     }
 
@@ -412,7 +417,7 @@ impl Note {
     fn lookup_wavelength(pitch: usize) -> i16 {
         let p =
             i16::try_from(pitch).unwrap() - Self::NUM_BENDS * i16::from(u8::from(Self::BASE_NOTE));
-        (f64::try_from(Self::NUM_SAMPLES).unwrap()
+        (f64::try_from(8192).unwrap()
             / (Self::BASE_FREQUENCY * (f64::try_from(p).unwrap() / Self::DENOMINATOR).exp2()))
         .round() as i16
     }
