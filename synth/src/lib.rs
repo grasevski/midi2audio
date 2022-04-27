@@ -417,9 +417,8 @@ impl Note {
     fn lookup_wavelength(pitch: usize) -> i16 {
         let p =
             i16::try_from(pitch).unwrap() - Self::NUM_BENDS * i16::from(u8::from(Self::BASE_NOTE));
-        (f64::try_from(8192).unwrap()
-            / (Self::BASE_FREQUENCY * (f64::try_from(p).unwrap() / Self::DENOMINATOR).exp2()))
-        .round() as i16
+        (8192.0 / (Self::BASE_FREQUENCY * (f64::try_from(p).unwrap() / Self::DENOMINATOR).exp2()))
+            .round() as i16
     }
 }
 
