@@ -1,5 +1,5 @@
 //! Synthesizer unit testable logic.
-#![cfg_attr(not(feature = "std"), no_std)]
+#![no_std]
 use arrayvec::ArrayVec;
 use core::{
     cmp::{max, min},
@@ -14,22 +14,6 @@ pub type Midi = ArrayVec<u8, 4>;
 
 /// ADC midpoint reading.
 const MIDPOINT: u16 = 512;
-
-/// Generates the frequency to pitch mapping.
-#[cfg(feature = "std")]
-pub fn lookup_notes() -> [i16; Note::NUM_NOTES] {
-    let ret: ArrayVec<_, { Note::NUM_NOTES }> = (0..Note::NUM_NOTES).map(Note::lookup).collect();
-    ret.into_inner().unwrap()
-}
-
-/// Generates the pitch to wavelength mapping.
-#[cfg(feature = "std")]
-pub fn lookup_wavelengths() -> [i16; Note::NUM_WAVELENGTHS] {
-    let ret: ArrayVec<_, { Note::NUM_WAVELENGTHS }> = (0..Note::NUM_WAVELENGTHS)
-        .map(Note::lookup_wavelength)
-        .collect();
-    ret.into_inner().unwrap()
-}
 
 /// Digital signal processor.
 #[derive(Default)]
@@ -348,7 +332,7 @@ impl FrequencyTracker {
 
 /// A musical pitch and accompanying bend.
 #[derive(Clone, Copy, Eq, PartialEq)]
-struct Note {
+pub struct Note {
     /// A musical pitch.
     note: wmidi::Note,
 
@@ -357,30 +341,11 @@ struct Note {
 }
 
 impl Note {
-    /// The number of distinct pitches that can be recognized.
-    #[cfg(feature = "std")]
-    const NUM_NOTES: usize = 8192;
-
-    /// The number of distinct wavelengths represented by midi notes.
-    #[cfg(feature = "std")]
-    const NUM_WAVELENGTHS: usize = 2048;
-
     /// Base 2 logarithm of the number of subdivisions per semitone.
-    const LOG_NUM_BENDS: u8 = 4;
-
-    /// The number of subdivisions per semitone.
-    const NUM_BENDS: i16 = 1 << Self::LOG_NUM_BENDS;
-
-    /// The number of subdivisions per octave.
-    #[cfg(feature = "std")]
-    const DENOMINATOR: f64 = 12.0 * (Self::NUM_BENDS as f64);
+    pub const LOG_NUM_BENDS: u8 = 4;
 
     /// Tune everything with respect to A.
-    const BASE_NOTE: wmidi::Note = wmidi::Note::A0;
-
-    /// Frequency of A.
-    #[cfg(feature = "std")]
-    const BASE_FREQUENCY: f64 = 110.0;
+    pub const BASE_NOTE: wmidi::Note = wmidi::Note::A0;
 
     /// Tries to convert a frequency to a note.
     fn try_from_frequency(f: usize) -> Option<Self> {
@@ -393,7 +358,7 @@ impl Note {
         }
         let p = u16::try_from(p).unwrap();
         let pitch_bend = (8192
-            + ((p & (Self::NUM_BENDS as u16 - 1)) << (12 - Self::LOG_NUM_BENDS)))
+            + ((p & ((1 << Self::LOG_NUM_BENDS) - 1)) << (12 - Self::LOG_NUM_BENDS)))
             .try_into()
             .unwrap();
         let note = wmidi::Note::try_from(
@@ -401,24 +366,6 @@ impl Note {
         )
         .unwrap();
         Some(Note { note, pitch_bend })
-    }
-
-    /// Maps a given frequency to its pitch.
-    #[cfg(feature = "std")]
-    fn lookup(frequency: usize) -> i16 {
-        (Self::DENOMINATOR
-            * (f64::try_from(i16::try_from(frequency).unwrap()).unwrap() / Self::BASE_FREQUENCY)
-                .log2())
-        .round() as i16
-    }
-
-    /// Maps a given pitch to its wavelength.
-    #[cfg(feature = "std")]
-    fn lookup_wavelength(pitch: usize) -> i16 {
-        let p =
-            i16::try_from(pitch).unwrap() - Self::NUM_BENDS * i16::from(u8::from(Self::BASE_NOTE));
-        (8192.0 / (Self::BASE_FREQUENCY * (f64::try_from(p).unwrap() / Self::DENOMINATOR).exp2()))
-            .round() as i16
     }
 }
 
