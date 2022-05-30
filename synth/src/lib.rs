@@ -1,5 +1,5 @@
 //! Synthesizer unit testable logic.
-#![no_std]
+#![cfg_attr(not(test), no_std)]
 use arrayvec::ArrayVec;
 use core::{
     cmp::{max, min},
@@ -7,13 +7,27 @@ use core::{
 };
 use wmidi::{Channel, FromBytesError, MidiMessage, PitchBend, ProgramNumber, Velocity};
 
+/// Precomputed tables to get pitch and wavelength.
 mod lookup;
 
 /// Midi bytes are buffered while DSP is happening.
 pub type Midi = ArrayVec<u8, 4>;
 
 /// ADC midpoint reading.
-const MIDPOINT: u16 = 512;
+const MIDPOINT: u16 = 0x200;
+
+/// The number of bytes in a midi message.
+const MIDI_MESSAGE_LEN: usize = 3;
+
+/// Logarithm of the maximum time window.
+const MAX_LOG_WINDOW: u8 = 7;
+
+/// Logarithm of the time window.
+const LOG_WINDOW: u8 = 7;
+
+static_assertions::const_assert!(LOG_WINDOW > 1);
+
+static_assertions::const_assert!(LOG_WINDOW <= MAX_LOG_WINDOW);
 
 /// Digital signal processor.
 #[derive(Default)]
@@ -25,7 +39,7 @@ pub struct Synth<'a> {
     synth: SubtractiveSynth,
 
     /// Midi input buffer.
-    midi: ArrayVec<u8, 3>,
+    midi: ArrayVec<u8, MIDI_MESSAGE_LEN>,
 }
 
 impl Synth<'_> {
@@ -42,10 +56,7 @@ impl Synth<'_> {
                     i = j;
                 }
                 Err(err) => match err {
-                    FromBytesError::NoBytes => {
-                        break;
-                    }
-                    FromBytesError::NotEnoughBytes => {
+                    FromBytesError::NoBytes | FromBytesError::NotEnoughBytes => {
                         break;
                     }
                     _ => {
@@ -55,37 +66,100 @@ impl Synth<'_> {
                 },
             }
         }
-        let mut midi_out = Midi::default();
-        if let Some(midi) = self.controller.step(audio_in) {
-            unsafe {
-                midi_out.set_len(self.midi.capacity());
-            }
-            midi.copy_to_slice(&mut midi_out[..]).unwrap();
-        }
+        let midi_out = self
+            .controller
+            .step(audio_in)
+            .as_ref()
+            .map_or(Midi::new_const(), Self::serialize_midi);
         (self.synth.step(), midi_out)
+    }
+
+    /// Converts midi message to bytes.
+    fn serialize_midi(midi: &MidiMessage) -> Midi {
+        let mut midi_out = Midi::try_from(&[0; MIDI_MESSAGE_LEN][..]).unwrap();
+        midi.copy_to_slice(&mut midi_out[..]).unwrap();
+        midi_out
+    }
+}
+
+/// The number of different basic sound waves.
+const NUM_WAVES: usize = 3;
+
+/// A waveform as a function of period and time.
+type Wave = fn(i16, i16) -> i16;
+
+/// Defines the basic sound waves to generate.
+struct Waves(ArrayVec<Wave, NUM_WAVES>);
+
+impl Waves {
+    /// Alternates between min and max amplitude.
+    const fn square(t: i16, k: i16) -> i16 {
+        if (t << 1) <= k {
+            i16::MIN
+        } else {
+            i16::MAX - 1
+        }
+    }
+
+    /// A waveform resembling the teeth of a plain toothed saw.
+    const fn sawtooth(t: i16, k: i16) -> i16 {
+        ((i16::MAX - 1) / k) * ((t << 1) - k)
+    }
+
+    /// A piecwise linear triangle shaped waveform.
+    const fn triangle(t: i16, k: i16) -> i16 {
+        let x = if t <= (k >> 1) {
+            (t << 2) - k
+        } else {
+            k + (k << 1) - (t << 2)
+        };
+        ((i16::MAX - 1) / k) * x
+    }
+}
+
+impl Default for Waves {
+    fn default() -> Self {
+        ProgramNumber::default().into()
+    }
+}
+
+impl From<ProgramNumber> for Waves {
+    fn from(program_number: ProgramNumber) -> Self {
+        let mut waves: ArrayVec<Wave, NUM_WAVES> = ArrayVec::new_const();
+        let wave = max(u8::from(program_number) & 0b111, 1);
+        if wave & 0b1 != 0 {
+            waves.push(Self::square);
+        }
+        if wave & 0b10 != 0 {
+            waves.push(Self::sawtooth);
+        }
+        if wave & 0b100 != 0 {
+            waves.push(Self::triangle);
+        }
+        Self(waves)
     }
 }
 
 /// Converts midi to audio.
 #[derive(Default)]
 struct SubtractiveSynth {
-    /// Time step within the sound wave.
-    t: i16,
+    /// Generates the waveform.
+    oscillator: Option<Oscillator>,
 
-    /// Sound wave length.
-    k: i16,
+    /// The types of soundwaves to generate.
+    waves: Waves,
 
-    /// Previous amplitude, for doing low pass filter.
-    p: i16,
+    /// Filters the waveform.
+    filter: BandPassFilter,
+
+    /// The rate at which to taper off the note.
+    decay: u8,
 
     /// The note to play.
     note: Option<wmidi::Note>,
 
     /// A microtonal adjustment to the note to play.
     pitch_bend: PitchBend,
-
-    /// The selected musical instrument.
-    program_number: ProgramNumber,
 
     /// The volume of the note to play.
     velocity: Velocity,
@@ -95,15 +169,15 @@ impl SubtractiveSynth {
     /// Parses a midi event.
     fn read(&mut self, msg: &MidiMessage) {
         match *msg {
-            MidiMessage::NoteOff(channel, note, _) => {
+            MidiMessage::NoteOff(channel, note, velocity) => {
                 if channel == Channel::Ch1 && Some(note) == self.note {
-                    self.note = None;
-                    self.set_wavelength();
+                    self.decay = u8::from(velocity);
                 }
             }
             MidiMessage::NoteOn(channel, note, velocity) => {
                 if channel == Channel::Ch1 {
                     self.note = Some(note);
+                    self.decay = Default::default();
                     self.set_wavelength();
                     self.velocity = velocity;
                 }
@@ -114,9 +188,18 @@ impl SubtractiveSynth {
                 }
             }
             MidiMessage::ProgramChange(channel, program_number) => {
-                if channel == Channel::Ch1 {
-                    self.program_number = program_number;
+                if channel != Channel::Ch1 {
+                    return;
                 }
+                self.waves = program_number.into();
+                let program_number = u8::from(program_number);
+                let l = (program_number >> 3) & 0b11;
+                let mut h = (program_number >> 5) & 0b11;
+                let l = u8::try_from(0x100 - (0x100 >> l)).unwrap();
+                if h > 0 {
+                    h = 1 << (h - 1);
+                }
+                self.filter = BandPassFilter::new(l, h);
             }
             MidiMessage::ChannelPressure(channel, velocity) => {
                 if channel == Channel::Ch1 {
@@ -130,70 +213,149 @@ impl SubtractiveSynth {
                 }
             }
             MidiMessage::Reset => {
-                *self = Default::default();
+                *self = Self::default();
             }
             _ => {}
         }
     }
 
     /// Generates the next audio value.
+    #[allow(clippy::cast_possible_wrap)]
     fn step(&mut self) -> u8 {
-        self.p = if self.k == 0 {
-            0
+        const OFFSET: u8 = 15;
+        let velocity = u8::from(self.velocity);
+        if velocity <= self.decay {
+            self.oscillator = None;
         } else {
-            let program_number = u8::from(self.program_number);
-            let wave = max(program_number & 0b111, 1);
-            const MAX_ALPHA: u8 = 16;
-            let a = i16::from(MAX_ALPHA - ((program_number >> 3) & 0b1111));
-            let v = ((i16::MAX - 1) >> 11) * a * i16::from(u8::from(self.velocity))
-                / i16::try_from(wave.count_ones()).unwrap();
-            let mut r = 0_i16;
-            if wave & 0b1 != 0 {
-                r += Self::square(self.t, self.k, v);
-            }
-            if wave & 0b10 != 0 {
-                r += Self::sawtooth(self.t, self.k, v);
-            }
-            if wave & 0b100 != 0 {
-                r += Self::triangle(self.t, self.k, v);
-            }
-            self.t = (self.t + 1) % self.k;
-            r + (i16::from(MAX_ALPHA) - a) * (self.p >> 4)
-        };
-        u8::try_from((self.p >> 9) + 128).unwrap()
+            self.velocity = Velocity::from_u8_lossy(velocity - self.decay);
+        }
+        let (waves, filter, velocity) = (&self.waves.0[..], &mut self.filter, self.velocity);
+        let ret = self.oscillator.as_mut().map_or(0, |oscillator| {
+            let y = oscillator.step(waves);
+            let v = i16::from(u8::from(velocity));
+            (filter.step(y.to_be_bytes()[0] as i8) >> 7) * v
+        });
+        if ret >= 0 {
+            u16::try_from(ret).unwrap() + (1 << OFFSET)
+        } else {
+            u16::try_from(ret - (-1 << OFFSET)).unwrap()
+        }
+        .to_be_bytes()[0]
     }
 
     /// Initializes the counter for iterating through the waveform.
     fn set_wavelength(&mut self) {
-        self.t = 0;
-        self.k = if let Some(note) = self.note {
+        self.oscillator = self.note.map(|note| {
             let pitch = i16::from(u8::from(note)) << Note::LOG_NUM_BENDS;
-            let bend =
-                i16::try_from(u16::from(self.pitch_bend) >> (14 - Note::LOG_NUM_BENDS)).unwrap();
-            lookup::WAVELENGTHS[usize::try_from(pitch + bend).unwrap()]
-        } else {
-            0
+            let bend = i16::try_from(u16::from(self.pitch_bend)).unwrap();
+            let bend = bend - i16::try_from(Note::PITCH_BEND_OFFSET).unwrap();
+            let bend = bend >> (12 - Note::LOG_NUM_BENDS);
+            let k = lookup::WAVELENGTHS[usize::try_from(pitch + bend).unwrap()];
+            Oscillator::new(k)
+        });
+    }
+}
+
+/// Generates the sound wave.
+struct Oscillator {
+    /// Time step within the sound wave.
+    t: i16,
+
+    /// Sound wave length.
+    k: i16,
+}
+
+impl Oscillator {
+    /// Initializes the oscillator with the given wavelength.
+    const fn new(k: i16) -> Self {
+        Self { t: 0, k }
+    }
+
+    /// Generates the next sample.
+    fn step(&mut self, w: &[Wave]) -> i16 {
+        self.t = (self.t + 1) % self.k;
+        let n = i16::try_from(w.len()).unwrap();
+        w.iter().map(|f| f(self.t, self.k) / n).sum()
+    }
+}
+
+/// Filters out frequencies outside a given range.
+#[derive(Default)]
+struct BandPassFilter {
+    l: LowPassFilter,
+    h: HighPassFilter,
+}
+
+impl BandPassFilter {
+    /// Constructs the filter based on the given range.
+    const fn new(l: u8, h: u8) -> Self {
+        Self {
+            l: LowPassFilter::new(l),
+            h: HighPassFilter::new(h),
         }
     }
 
-    /// Alternates between min and max amplitude.
-    fn square(t: i16, k: i16, v: i16) -> i16 {
-        v * if (t << 1) < k { -1 } else { 1 }
+    /// Calculates the output of the filter.
+    #[allow(clippy::cast_possible_wrap)]
+    fn step(&mut self, x: i8) -> i16 {
+        self.h.step(self.l.step(x).to_be_bytes()[0] as i8)
+    }
+}
+
+/// Filters out high frequencies.
+struct LowPassFilter {
+    a: u8,
+    y: i8,
+}
+
+impl Default for LowPassFilter {
+    fn default() -> Self {
+        Self::new(224)
+    }
+}
+
+impl LowPassFilter {
+    /// Constructs the filter based on the given cutoff.
+    const fn new(a: u8) -> Self {
+        Self { a, y: 0 }
     }
 
-    /// A waveform resembling the teeth of a plain toothed saw.
-    fn sawtooth(t: i16, k: i16, v: i16) -> i16 {
-        (v / k) * ((t << 1) - k)
+    /// Calculates the output of the filter.
+    #[allow(clippy::cast_possible_wrap)]
+    fn step(&mut self, x: i8) -> i16 {
+        let ret = (i16::from(!self.a) + 1) * i16::from(x) + i16::from(self.a) * i16::from(self.y);
+        self.y = ret.to_be_bytes()[0] as i8;
+        ret
+    }
+}
+
+/// Filters out low frequencies.
+struct HighPassFilter {
+    a: u8,
+    x: i8,
+    y: i8,
+}
+
+impl Default for HighPassFilter {
+    fn default() -> Self {
+        Self::new(4)
+    }
+}
+
+impl HighPassFilter {
+    /// Constructs the filter based on the given cutoff.
+    const fn new(a: u8) -> Self {
+        Self { a, x: 0, y: 0 }
     }
 
-    /// A piecwise linear triangle shaped waveform.
-    fn triangle(t: i16, k: i16, v: i16) -> i16 {
-        let x = if (t << 1) < k {
-            (t << 2) - k
-        } else {
-            k + (k >> 1) - (t << 2)
-        };
-        (v / k) * x
+    /// Calculates the output of the filter.
+    #[allow(clippy::cast_possible_wrap)]
+    fn step(&mut self, x: i8) -> i16 {
+        let a = i16::from(!self.a & 0x7f) + 1;
+        let ret = a * (i16::from(self.y) + i16::from(x) - i16::from(self.x));
+        self.x = x;
+        self.y = ret.to_be_bytes()[0] as i8;
+        ret
     }
 }
 
@@ -209,6 +371,9 @@ struct MidiController<'a> {
     /// Calculates the amplitude over time.
     amplitude: AmplitudeTracker,
 
+    /// Filters the sound prior to frequency tracking.
+    filter: BandPassFilter,
+
     /// Calculates the frequency over time.
     frequency: FrequencyTracker,
 
@@ -221,41 +386,44 @@ impl MidiController<'_> {
     fn step(&mut self, audio_in: u16) -> Option<MidiMessage> {
         self.t += 1;
         self.amplitude.step(audio_in);
-        self.frequency.step(audio_in);
-        if self.t < 64 {
+        let audio_in = i16::try_from(audio_in).unwrap() - i16::try_from(MIDPOINT).unwrap();
+        let audio_in = self.filter.step(i8::try_from(audio_in >> 2).unwrap());
+        let audio_in = (audio_in >> 6) + i16::try_from(MIDPOINT).unwrap();
+        self.frequency.step(u16::try_from(audio_in).unwrap());
+        if self.t < (1 << LOG_WINDOW) {
             return self.msgs.pop();
         }
         let a = self.amplitude.calculate();
         let f = self.frequency.calculate();
-        self.amplitude = Default::default();
-        self.frequency = Default::default();
+        self.amplitude = AmplitudeTracker::default();
+        self.frequency = FrequencyTracker::default();
         if let Some(f) = f {
             let note_on = MidiMessage::NoteOn(Channel::Ch1, f.note, a);
             let pitch_bend_change = MidiMessage::PitchBendChange(Channel::Ch1, f.pitch_bend);
             if let Some(p) = self.f {
-                if p.note == f.note {
+                let (p_note, f_note) = (u8::from(p.note), u8::from(f.note));
+                if p_note >= f_note - 2 && p_note <= f_note + 1 {
                     self.msgs
                         .push(MidiMessage::ChannelPressure(Channel::Ch1, a));
-                    self.msgs.push(pitch_bend_change);
+                    let pitch_bend = i16::try_from(u16::from(f.pitch_bend)).unwrap()
+                        + 0x1000 * (i16::from(p_note) - i16::from(f_note));
+                    let pitch_bend =
+                        PitchBend::try_from(u16::try_from(pitch_bend).unwrap()).unwrap();
+                    self.msgs
+                        .push(MidiMessage::PitchBendChange(Channel::Ch1, pitch_bend));
                 } else {
                     self.msgs.push(note_on);
                     self.msgs.push(pitch_bend_change);
-                    self.msgs.push(MidiMessage::NoteOff(
-                        Channel::Ch1,
-                        p.note,
-                        Default::default(),
-                    ));
+                    self.msgs
+                        .push(MidiMessage::NoteOff(Channel::Ch1, p.note, a));
                 }
             } else {
                 self.msgs.push(note_on);
                 self.msgs.push(pitch_bend_change);
             }
         } else if let Some(f) = self.f {
-            self.msgs.push(MidiMessage::NoteOff(
-                Channel::Ch1,
-                f.note,
-                Default::default(),
-            ));
+            self.msgs
+                .push(MidiMessage::NoteOff(Channel::Ch1, f.note, a));
         }
         self.f = f;
         self.t = 0;
@@ -279,7 +447,12 @@ impl AmplitudeTracker {
 
     /// Takes the mean of the absolute values of the audio wave.
     fn calculate(&self) -> Velocity {
-        Velocity::from_u8_lossy(self.0.to_be_bytes()[0])
+        let v = if LOG_WINDOW == MAX_LOG_WINDOW {
+            self.0 >> 1
+        } else {
+            self.0 << (i16::from(MAX_LOG_WINDOW - LOG_WINDOW) - 1)
+        };
+        Velocity::from_u8_lossy(v.to_be_bytes()[0])
     }
 }
 
@@ -322,9 +495,9 @@ impl FrequencyTracker {
     /// Estimates pitch based on number of zero crossings and where they start and end.
     fn calculate(&self) -> Option<Note> {
         if self.i == self.f {
-            Default::default()
+            None
         } else {
-            let f = u16::from(self.k - 1) * (32768 / u16::from(self.f - self.i));
+            let f = u16::from(self.k - 1) * (Note::FREQUENCY_MULTIPLE / u16::from(self.f - self.i));
             Note::try_from_frequency((f >> 1).into())
         }
     }
@@ -342,10 +515,31 @@ pub struct Note {
 
 impl Note {
     /// Base 2 logarithm of the number of subdivisions per semitone.
-    pub const LOG_NUM_BENDS: u8 = 4;
+    pub const LOG_NUM_BENDS: u8 = 0;
+
+    /// The number of subdivisions per octave.
+    pub const OCTAVE: u8 = 12 << Self::LOG_NUM_BENDS;
 
     /// Tune everything with respect to A.
-    pub const BASE_NOTE: wmidi::Note = wmidi::Note::A0;
+    pub const BASE_NOTE: wmidi::Note = wmidi::Note::A1;
+
+    /// Frequency of A.
+    pub const BASE_FREQUENCY: f64 = 55.0;
+
+    /// Number of audio samples per second.
+    pub const SAMPLE_RATE: u16 = 1 << 13;
+
+    /// Base 2 logarithm of the frequency resolution.
+    pub const LOG_FREQUENCY_DIVISOR: u8 = 2;
+
+    /// Multiple for the inverse wavelength lookup.
+    const FREQUENCY_MULTIPLE: u16 = Self::SAMPLE_RATE << Self::LOG_FREQUENCY_DIVISOR;
+
+    /// A semitone pitch bend.
+    const SEMITONE: u16 = 0x1000;
+
+    /// Pitch bend midpoint.
+    const PITCH_BEND_OFFSET: u16 = 2 * Self::SEMITONE;
 
     /// Tries to convert a frequency to a note.
     fn try_from_frequency(f: usize) -> Option<Self> {
@@ -357,7 +551,7 @@ impl Note {
             return None;
         }
         let p = u16::try_from(p).unwrap();
-        let pitch_bend = (8192
+        let pitch_bend = (Self::PITCH_BEND_OFFSET
             + ((p & ((1 << Self::LOG_NUM_BENDS) - 1)) << (12 - Self::LOG_NUM_BENDS)))
             .try_into()
             .unwrap();
@@ -365,14 +559,180 @@ impl Note {
             u8::from(Self::BASE_NOTE) + u8::try_from(p >> Self::LOG_NUM_BENDS).unwrap(),
         )
         .unwrap();
-        Some(Note { note, pitch_bend })
+        Some(Self { note, pitch_bend })
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::{lookup, Midi, Note, Synth, LOG_WINDOW, MIDPOINT};
+    use core::convert::TryFrom;
+    use proptest::prelude::*;
+    use wmidi::{Channel, MidiMessage, PitchBend, ProgramNumber, Velocity};
+
+    /// Smallest pitch bend.
+    const PITCH_BEND_MULTIPLE: u16 = 1 << (12 - Note::LOG_NUM_BENDS);
+
+    /// Check that converting wavelength to frequency to pitch to wavelength works.
     #[test]
-    fn it_works() {
-        assert_eq!(2 + 2, 4);
+    fn lookup() {
+        let base_note = usize::from(u8::from(Note::BASE_NOTE)) << Note::LOG_NUM_BENDS;
+        let max_note = base_note + 5 * usize::from(Note::OCTAVE);
+        for &actual in &lookup::WAVELENGTHS[base_note..max_note] {
+            let f = usize::from(Note::FREQUENCY_MULTIPLE / u16::try_from(actual).unwrap());
+            let p = lookup::NOTES[f] + i16::try_from(base_note).unwrap();
+            let expected = lookup::WAVELENGTHS[usize::try_from(p).unwrap()];
+            assert_eq!(actual, expected);
+        }
+    }
+
+    prop_compose! {
+        /// A random bend to a note.
+        fn arb_bend()(pitch_bend in 0_u8..(8 << Note::LOG_NUM_BENDS), velocity in 0_u8..0x80) -> (Option<PitchBend>, Option<Velocity>) {
+            const LAST_BIT: u8 = 4 << Note::LOG_NUM_BENDS;
+            let pitch_bend = if pitch_bend & LAST_BIT == 0 {
+                None
+            } else {
+                let pitch_bend = PITCH_BEND_MULTIPLE * u16::from(pitch_bend & !LAST_BIT);
+                Some(PitchBend::try_from(pitch_bend).unwrap())
+            };
+            let velocity = if velocity == 0 {
+                None
+            } else {
+                Some(Velocity::from_u8_lossy(velocity))
+            };
+            (pitch_bend, velocity)
+        }
+    }
+
+    proptest! {
+        /// Check that converting midi to audio and back works.
+        #[test]
+        fn roundtrip(program_number in 0_u8..1, pitch_bend in 0_u16..(1 << Note::LOG_NUM_BENDS), note in 36_u8..76, velocity in 7_u8..9, off_velocity in 7_u8..0x80, bends in prop::collection::vec(arb_bend(), 0..100)) {
+            const MIDPOINT_OUT: u8 = 0x80;
+            const OUT_BITS: u8 = 2;
+            let program_number = ProgramNumber::from_u8_lossy(program_number);
+            let pitch_bend = PitchBend::try_from(Note::PITCH_BEND_OFFSET + PITCH_BEND_MULTIPLE * pitch_bend).unwrap();
+            let note = wmidi::Note::from_u8_lossy(note);
+            let mut velocity = Velocity::from_u8_lossy(velocity);
+            let off_velocity = Velocity::from_u8_lossy(off_velocity);
+            let (mut midi2audio, mut audio2midi) = (Synth::default(), Synth::default());
+            let msg = MidiMessage::ProgramChange(Channel::Ch1, program_number);
+            let midi_in = Synth::serialize_midi(&msg);
+            let (_, midi_out) = midi2audio.step(MIDPOINT, &midi_in);
+            prop_assert!(midi_out.is_empty());
+            let msg = MidiMessage::PitchBendChange(Channel::Ch1, pitch_bend);
+            let mut pitch_bend = Synth::serialize_midi(&msg);
+            let (_, midi_out) = midi2audio.step(MIDPOINT, &pitch_bend);
+            prop_assert!(midi_out.is_empty());
+            let msg = MidiMessage::NoteOn(Channel::Ch1, note, velocity);
+            let note_on = Synth::serialize_midi(&msg);
+            let (audio_out, midi_out) = midi2audio.step(MIDPOINT, &note_on);
+            prop_assert!(midi_out.is_empty());
+            let (audio_out, midi_out) = audio2midi.step(u16::from(audio_out) << OUT_BITS, &midi_out);
+            prop_assert_eq!(audio_out, MIDPOINT_OUT);
+            prop_assert!(midi_out.is_empty());
+            let midi_in = Midi::default();
+            for _ in 0..((1 << LOG_WINDOW) - 2) {
+                let (audio_out, midi_out) = midi2audio.step(MIDPOINT, &midi_in);
+                prop_assert!(midi_out.is_empty());
+                let (audio_out, midi_out) = audio2midi.step(u16::from(audio_out) << OUT_BITS, &midi_out);
+                prop_assert_eq!(audio_out, MIDPOINT_OUT);
+                prop_assert!(midi_out.is_empty());
+            }
+            let (audio_out, midi_out) = midi2audio.step(MIDPOINT, &midi_in);
+            prop_assert!(midi_out.is_empty());
+            let (audio_out, midi_out) = audio2midi.step(u16::from(audio_out) << OUT_BITS, &midi_out);
+            prop_assert_eq!(audio_out, MIDPOINT_OUT);
+            prop_assert_eq!(&midi_out, &pitch_bend);
+            let (audio_out, midi_out) = midi2audio.step(MIDPOINT, &midi_in);
+            prop_assert!(midi_out.is_empty());
+            let (audio_out, midi_out) = audio2midi.step(u16::from(audio_out) << OUT_BITS, &midi_out);
+            prop_assert_eq!(audio_out, MIDPOINT_OUT);
+            prop_assert_eq!(&midi_out[0..2], &note_on[0..2]);
+            let msg = MidiMessage::ChannelPressure(Channel::Ch1, velocity);
+            let mut channel_pressure = Synth::serialize_midi(&msg);
+            for (bend, vol) in bends {
+                // FIXME
+                break;
+                if let Some(bend) = bend {
+                    let msg = MidiMessage::PitchBendChange(Channel::Ch1, bend);
+                    pitch_bend = Synth::serialize_midi(&msg);
+                    let (_, midi_out) = midi2audio.step(MIDPOINT, &pitch_bend);
+                    prop_assert!(midi_out.is_empty());
+                }
+                if let Some(vol) = vol {
+                    velocity = vol;
+                    let msg = MidiMessage::ChannelPressure(Channel::Ch1, vol);
+                    channel_pressure = Synth::serialize_midi(&msg);
+                    let (_, midi_out) = midi2audio.step(MIDPOINT, &channel_pressure);
+                    prop_assert!(midi_out.is_empty());
+                }
+                for _ in 0..((1 << LOG_WINDOW) - 3) {
+                    let (audio_out, midi_out) = midi2audio.step(MIDPOINT, &midi_in);
+                    prop_assert!(midi_out.is_empty());
+                    let (audio_out, midi_out) = audio2midi.step(u16::from(audio_out) << OUT_BITS, &midi_out);
+                    prop_assert_eq!(audio_out, MIDPOINT_OUT);
+                    prop_assert!(midi_out.is_empty());
+                }
+                let (audio_out, midi_out) = midi2audio.step(MIDPOINT, &midi_in);
+                prop_assert!(midi_out.is_empty());
+                let (audio_out, midi_out) = audio2midi.step(u16::from(audio_out) << OUT_BITS, &midi_out);
+                prop_assert_eq!(audio_out, MIDPOINT_OUT);
+                prop_assert_eq!(&midi_out, &pitch_bend);
+                let (audio_out, midi_out) = midi2audio.step(MIDPOINT, &midi_in);
+                prop_assert!(midi_out.is_empty());
+                let (audio_out, midi_out) = audio2midi.step(u16::from(audio_out) << OUT_BITS, &midi_out);
+                prop_assert_eq!(audio_out, MIDPOINT_OUT);
+                prop_assert_eq!(&midi_out[0..2], &channel_pressure[0..2]);
+            }
+            let msg = MidiMessage::NoteOff(Channel::Ch1, note, off_velocity);
+            let note_off = Synth::serialize_midi(&msg);
+            let (_, midi_out) = midi2audio.step(MIDPOINT, &note_off);
+            prop_assert!(midi_out.is_empty());
+            let (audio_out, midi_out) = audio2midi.step(u16::from(audio_out) << OUT_BITS, &midi_out);
+            prop_assert_eq!(audio_out, MIDPOINT_OUT);
+            prop_assert!(midi_out.is_empty());
+            for _ in 0..((1 << LOG_WINDOW) - 3) {
+                let (audio_out, midi_out) = midi2audio.step(MIDPOINT, &midi_in);
+                prop_assert!(midi_out.is_empty());
+                let (audio_out, midi_out) = audio2midi.step(u16::from(audio_out) << OUT_BITS, &midi_out);
+                prop_assert_eq!(audio_out, MIDPOINT_OUT);
+                prop_assert!(midi_out.is_empty());
+            }
+            let velocity = u16::from(u8::from(velocity));
+            let off_velocity = u16::from(u8::from(off_velocity));
+            for _ in 0..(velocity/(off_velocity << LOG_WINDOW)) {
+                let (audio_out, midi_out) = midi2audio.step(MIDPOINT, &midi_in);
+                prop_assert!(midi_out.is_empty());
+                let (audio_out, midi_out) = audio2midi.step(u16::from(audio_out) << OUT_BITS, &midi_out);
+                prop_assert_eq!(audio_out, MIDPOINT_OUT);
+                prop_assert_eq!(&midi_out, &pitch_bend);
+                let (audio_out, midi_out) = midi2audio.step(MIDPOINT, &midi_in);
+                prop_assert!(midi_out.is_empty());
+                let (audio_out, midi_out) = audio2midi.step(u16::from(audio_out) << OUT_BITS, &midi_out);
+                prop_assert_eq!(audio_out, MIDPOINT_OUT);
+                prop_assert_eq!(&midi_out[0..2], &channel_pressure[0..2]);
+                for _ in 0..((1 << LOG_WINDOW) - 2) {
+                    let (audio_out, midi_out) = midi2audio.step(MIDPOINT, &midi_in);
+                    prop_assert!(midi_out.is_empty());
+                    let (audio_out, midi_out) = audio2midi.step(u16::from(audio_out) << OUT_BITS, &midi_out);
+                    prop_assert_eq!(audio_out, MIDPOINT_OUT);
+                    prop_assert!(midi_out.is_empty());
+                }
+            }
+            let (audio_out, midi_out) = midi2audio.step(MIDPOINT, &midi_in);
+            prop_assert!(midi_out.is_empty());
+            let (audio_out, midi_out) = audio2midi.step(u16::from(audio_out) << OUT_BITS, &midi_out);
+            prop_assert_eq!(audio_out, MIDPOINT_OUT);
+            prop_assert_eq!(&midi_out[0..2], &note_off[0..2]);
+            for _ in 0..((1 << LOG_WINDOW) - 1) {
+                let (audio_out, midi_out) = midi2audio.step(MIDPOINT, &midi_in);
+                prop_assert!(midi_out.is_empty());
+                let (audio_out, midi_out) = audio2midi.step(u16::from(audio_out) << OUT_BITS, &midi_out);
+                prop_assert_eq!(audio_out, MIDPOINT_OUT);
+                prop_assert!(midi_out.is_empty());
+            }
+        }
     }
 }
