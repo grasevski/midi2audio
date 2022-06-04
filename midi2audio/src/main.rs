@@ -3,6 +3,7 @@
 #![no_main]
 #![feature(abi_avr_interrupt)]
 use arduino_hal::{
+    adc::AdcSettings,
     default_serial, entry,
     hal::{
         clock::MHz16,
@@ -73,7 +74,7 @@ fn main() -> ! {
     });
     tc0.tccr0b.write(|w| w.cs0().direct());
     tc0.ocr0a.write(|w| unsafe { w.bits(128) });
-    let mut adc = Adc::new(dp.ADC, Default::default());
+    let mut adc = Adc::new(dp.ADC, AdcSettings::default());
     let a0 = pins.a0.into_analog_input(&mut adc);
     //let mut serial = default_serial!(dp, pins, 31250);
     //serial.listen(Event::RxComplete);

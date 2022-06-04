@@ -94,7 +94,7 @@ struct Waves(ArrayVec<Wave, NUM_WAVES>);
 impl Waves {
     /// Alternates between min and max amplitude.
     const fn square(t: i16, k: i16) -> i16 {
-        if (t << 1) <= k {
+        if t << 1 <= k {
             i16::MIN
         } else {
             i16::MAX - 1
@@ -108,7 +108,7 @@ impl Waves {
 
     /// A piecwise linear triangle shaped waveform.
     const fn triangle(t: i16, k: i16) -> i16 {
-        let x = if t <= (k >> 1) {
+        let x = if t <= k >> 1 {
             (t << 2) - k
         } else {
             k + (k << 1) - (t << 2)
@@ -193,8 +193,8 @@ impl SubtractiveSynth {
                 }
                 self.waves = program_number.into();
                 let program_number = u8::from(program_number);
-                let l = (program_number >> 3) & 0b11;
-                let mut h = (program_number >> 5) & 0b11;
+                let l = program_number >> 3 & 0b11;
+                let mut h = program_number >> 5 & 0b11;
                 let l = u8::try_from(0x100 - (0x100 >> l)).unwrap();
                 if h > 0 {
                     h = 1 << (h - 1);
@@ -390,7 +390,7 @@ impl MidiController<'_> {
         let audio_in = self.filter.step(i8::try_from(audio_in >> 2).unwrap());
         let audio_in = (audio_in >> 6) + i16::try_from(MIDPOINT).unwrap();
         self.frequency.step(u16::try_from(audio_in).unwrap());
-        if self.t < (1 << LOG_WINDOW) {
+        if self.t < 1 << LOG_WINDOW {
             return self.msgs.pop();
         }
         let a = self.amplitude.calculate();
@@ -527,7 +527,7 @@ impl Note {
     pub const BASE_FREQUENCY: f64 = 55.0;
 
     /// Number of audio samples per second.
-    pub const SAMPLE_RATE: u16 = 1 << 13;
+    pub const SAMPLE_RATE: u16 = 9615;
 
     /// Base 2 logarithm of the frequency resolution.
     pub const LOG_FREQUENCY_DIVISOR: u8 = 2;
@@ -586,35 +586,16 @@ mod tests {
         }
     }
 
-    prop_compose! {
-        /// A random bend to a note.
-        fn arb_bend()(pitch_bend in 0_u8..(8 << Note::LOG_NUM_BENDS), velocity in 0_u8..0x80) -> (Option<PitchBend>, Option<Velocity>) {
-            const LAST_BIT: u8 = 4 << Note::LOG_NUM_BENDS;
-            let pitch_bend = if pitch_bend & LAST_BIT == 0 {
-                None
-            } else {
-                let pitch_bend = PITCH_BEND_MULTIPLE * u16::from(pitch_bend & !LAST_BIT);
-                Some(PitchBend::try_from(pitch_bend).unwrap())
-            };
-            let velocity = if velocity == 0 {
-                None
-            } else {
-                Some(Velocity::from_u8_lossy(velocity))
-            };
-            (pitch_bend, velocity)
-        }
-    }
-
     proptest! {
         /// Check that converting midi to audio and back works.
         #[test]
-        fn roundtrip(program_number in 0_u8..1, pitch_bend in 0_u16..(1 << Note::LOG_NUM_BENDS), note in 36_u8..76, velocity in 7_u8..9, off_velocity in 7_u8..0x80, bends in prop::collection::vec(arb_bend(), 0..100)) {
+        fn roundtrip(program_number in 0_u8..1, pitch_bend in 0_u16..(1 << Note::LOG_NUM_BENDS), note in 39_u8..74, velocity in 7_u8..9, off_velocity in 7_u8..0x80) {
             const MIDPOINT_OUT: u8 = 0x80;
             const OUT_BITS: u8 = 2;
             let program_number = ProgramNumber::from_u8_lossy(program_number);
             let pitch_bend = PitchBend::try_from(Note::PITCH_BEND_OFFSET + PITCH_BEND_MULTIPLE * pitch_bend).unwrap();
             let note = wmidi::Note::from_u8_lossy(note);
-            let mut velocity = Velocity::from_u8_lossy(velocity);
+            let velocity = Velocity::from_u8_lossy(velocity);
             let off_velocity = Velocity::from_u8_lossy(off_velocity);
             let (mut midi2audio, mut audio2midi) = (Synth::default(), Synth::default());
             let msg = MidiMessage::ProgramChange(Channel::Ch1, program_number);
@@ -622,7 +603,7 @@ mod tests {
             let (_, midi_out) = midi2audio.step(MIDPOINT, &midi_in);
             prop_assert!(midi_out.is_empty());
             let msg = MidiMessage::PitchBendChange(Channel::Ch1, pitch_bend);
-            let mut pitch_bend = Synth::serialize_midi(&msg);
+            let pitch_bend = Synth::serialize_midi(&msg);
             let (_, midi_out) = midi2audio.step(MIDPOINT, &pitch_bend);
             prop_assert!(midi_out.is_empty());
             let msg = MidiMessage::NoteOn(Channel::Ch1, note, velocity);
@@ -651,41 +632,7 @@ mod tests {
             prop_assert_eq!(audio_out, MIDPOINT_OUT);
             prop_assert_eq!(&midi_out[0..2], &note_on[0..2]);
             let msg = MidiMessage::ChannelPressure(Channel::Ch1, velocity);
-            let mut channel_pressure = Synth::serialize_midi(&msg);
-            for (bend, vol) in bends {
-                // FIXME
-                break;
-                if let Some(bend) = bend {
-                    let msg = MidiMessage::PitchBendChange(Channel::Ch1, bend);
-                    pitch_bend = Synth::serialize_midi(&msg);
-                    let (_, midi_out) = midi2audio.step(MIDPOINT, &pitch_bend);
-                    prop_assert!(midi_out.is_empty());
-                }
-                if let Some(vol) = vol {
-                    velocity = vol;
-                    let msg = MidiMessage::ChannelPressure(Channel::Ch1, vol);
-                    channel_pressure = Synth::serialize_midi(&msg);
-                    let (_, midi_out) = midi2audio.step(MIDPOINT, &channel_pressure);
-                    prop_assert!(midi_out.is_empty());
-                }
-                for _ in 0..((1 << LOG_WINDOW) - 3) {
-                    let (audio_out, midi_out) = midi2audio.step(MIDPOINT, &midi_in);
-                    prop_assert!(midi_out.is_empty());
-                    let (audio_out, midi_out) = audio2midi.step(u16::from(audio_out) << OUT_BITS, &midi_out);
-                    prop_assert_eq!(audio_out, MIDPOINT_OUT);
-                    prop_assert!(midi_out.is_empty());
-                }
-                let (audio_out, midi_out) = midi2audio.step(MIDPOINT, &midi_in);
-                prop_assert!(midi_out.is_empty());
-                let (audio_out, midi_out) = audio2midi.step(u16::from(audio_out) << OUT_BITS, &midi_out);
-                prop_assert_eq!(audio_out, MIDPOINT_OUT);
-                prop_assert_eq!(&midi_out, &pitch_bend);
-                let (audio_out, midi_out) = midi2audio.step(MIDPOINT, &midi_in);
-                prop_assert!(midi_out.is_empty());
-                let (audio_out, midi_out) = audio2midi.step(u16::from(audio_out) << OUT_BITS, &midi_out);
-                prop_assert_eq!(audio_out, MIDPOINT_OUT);
-                prop_assert_eq!(&midi_out[0..2], &channel_pressure[0..2]);
-            }
+            let channel_pressure = Synth::serialize_midi(&msg);
             let msg = MidiMessage::NoteOff(Channel::Ch1, note, off_velocity);
             let note_off = Synth::serialize_midi(&msg);
             let (_, midi_out) = midi2audio.step(MIDPOINT, &note_off);
