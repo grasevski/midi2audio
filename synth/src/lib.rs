@@ -274,8 +274,11 @@ impl Oscillator {
     /// Generates the next sample.
     fn step(&mut self, w: &[Wave]) -> i16 {
         self.t = (self.t + 1) % self.k;
-        let n = i16::try_from(w.len()).unwrap();
-        w.iter().map(|f| f(self.t, self.k) / n).sum()
+        let (n, mut x) = (i16::try_from(w.len()).unwrap(), 0);
+        for f in w {
+            x += f(self.t, self.k) / n;
+        }
+        x
     }
 }
 
