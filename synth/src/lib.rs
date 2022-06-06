@@ -11,7 +11,10 @@ use wmidi::{Channel, FromBytesError, MidiMessage, PitchBend, ProgramNumber, Velo
 mod lookup;
 
 /// Midi bytes are buffered while DSP is happening.
-pub type Midi = ArrayVec<u8, 4>;
+pub type Midi = ArrayVec<u8, MIDI_CAP>;
+
+/// Number of bytes that can be buffered.
+const MIDI_CAP: usize = 4;
 
 /// ADC midpoint reading.
 const MIDPOINT: u16 = 0x200;
@@ -47,7 +50,7 @@ impl Synth<'_> {
     pub fn step(&mut self, audio_in: u16, midi_in: &Midi) -> (u8, Midi) {
         let mut i = 0;
         while i < midi_in.len() {
-            let j = min(self.midi.remaining_capacity(), midi_in.len() - i);
+            let j = i + min(self.midi.remaining_capacity(), midi_in.len() - i);
             self.midi.try_extend_from_slice(&midi_in[i..j]).unwrap();
             match MidiMessage::try_from(&self.midi[..]) {
                 Ok(midi) => {
@@ -245,13 +248,18 @@ impl SubtractiveSynth {
 
     /// Initializes the counter for iterating through the waveform.
     fn set_wavelength(&mut self) {
-        self.oscillator = self.note.map(|note| {
+        self.oscillator = self.note.and_then(|note| {
             let pitch = i16::from(u8::from(note)) << Note::LOG_NUM_BENDS;
             let bend = i16::try_from(u16::from(self.pitch_bend)).unwrap();
             let bend = bend - i16::try_from(Note::PITCH_BEND_OFFSET).unwrap();
             let bend = bend >> (12 - Note::LOG_NUM_BENDS);
-            let k = lookup::WAVELENGTHS[usize::try_from(pitch + bend).unwrap()];
-            Oscillator::new(k)
+            let note = pitch + bend;
+            if note >= 0 {
+                let k = lookup::WAVELENGTHS[usize::try_from(note).unwrap()];
+                Some(Oscillator::new(k))
+            } else {
+                None
+            }
         });
     }
 }
@@ -568,7 +576,7 @@ impl Note {
 
 #[cfg(test)]
 mod tests {
-    use super::{lookup, Midi, Note, Synth, LOG_WINDOW, MIDPOINT};
+    use super::{lookup, Midi, Note, Synth, LOG_WINDOW, MIDI_CAP, MIDPOINT};
     use core::convert::TryFrom;
     use proptest::prelude::*;
     use wmidi::{Channel, MidiMessage, PitchBend, ProgramNumber, Velocity};
@@ -590,9 +598,18 @@ mod tests {
     }
 
     proptest! {
+        /// Check that input is handled gracefully.
+        #[test]
+        fn fuzz(steps in prop::collection::vec((0_u16..(2 * MIDPOINT), prop::collection::vec(0_u8.., 0..MIDI_CAP)), 0..1000)) {
+            let mut synth = Synth::default();
+            for (audio_in, midi_in) in steps {
+                synth.step(audio_in, &Midi::try_from(&midi_in[..]).unwrap());
+            }
+        }
+
         /// Check that converting midi to audio and back works.
         #[test]
-        fn roundtrip(program_number in 0_u8..1, pitch_bend in 0_u16..(1 << Note::LOG_NUM_BENDS), note in 39_u8..74, velocity in 7_u8..9, off_velocity in 7_u8..0x80) {
+        fn roundtrip(l: u8, h: u8, program_number in 0_u8..2, pitch_bend in 0_u16..(1 << Note::LOG_NUM_BENDS), note in 39_u8..74, velocity in 7_u8..22, off_velocity in 2_u8..0x80) {
             const MIDPOINT_OUT: u8 = 0x80;
             const OUT_BITS: u8 = 2;
             let program_number = ProgramNumber::from_u8_lossy(program_number);
