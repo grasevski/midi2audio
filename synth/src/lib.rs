@@ -253,9 +253,9 @@ impl SubtractiveSynth {
             let bend = i16::try_from(u16::from(self.pitch_bend)).unwrap();
             let bend = bend - i16::try_from(Note::PITCH_BEND_OFFSET).unwrap();
             let bend = bend >> (12 - Note::LOG_NUM_BENDS);
-            let note = pitch + bend;
-            if note >= 0 {
-                let k = lookup::WAVELENGTHS[usize::try_from(note).unwrap()];
+            let x = pitch + bend;
+            if x >= 0 {
+                let k = lookup::WAVELENGTHS[usize::try_from(x).unwrap()];
                 Some(Oscillator::new(k))
             } else {
                 None

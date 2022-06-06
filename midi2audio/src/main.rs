@@ -13,7 +13,7 @@ use arduino_hal::{
 };
 use avr_device::{asm::sleep, interrupt};
 use core::cell::RefCell;
-//use embedded_hal::serial::Read;
+use embedded_hal::serial::Read;
 use panic_halt as _;
 use synth::{Midi, Synth};
 
@@ -76,34 +76,34 @@ fn main() -> ! {
     tc0.ocr0a.write(|w| unsafe { w.bits(128) });
     let mut adc = Adc::new(dp.ADC, AdcSettings::default());
     let a0 = pins.a0.into_analog_input(&mut adc);
-    //let mut serial = default_serial!(dp, pins, 31250);
-    //serial.listen(Event::RxComplete);
-    //serial.listen(Event::DataRegisterEmpty);
+    let mut serial = default_serial!(dp, pins, 31250);
+    serial.listen(Event::RxComplete);
+    serial.listen(Event::DataRegisterEmpty);
+    interrupt::free(|cs| SERIAL.borrow(cs).replace(Some(serial)));
     //let mut serial = default_serial!(dp, pins, 57600);
-    //interrupt::free(|cs| SERIAL.borrow(cs).replace(Some(serial)));
     unsafe { interrupt::enable() };
-    let (mut synth, mut _midi_out) = (Synth::default(), Midi::new_const());
+    let (mut synth, mut midi_out) = (Synth::default(), Midi::new_const());
     loop {
         while let Ok(audio_in) = adc.read_nonblocking(&a0) {
             let midi_in: Midi = interrupt::free(|cs| {
-                //let mut serial = SERIAL.borrow(cs).borrow_mut();
-                //if !midi_out.is_empty() {
-                //    serial.as_mut().unwrap().write_byte(midi_out[0]);
-                //    let mut midi = MIDI_OUT.borrow(cs).borrow_mut();
-                //    for &byte in midi_out[1..].iter().rev() {
-                //        midi.push(byte);
-                //    }
-                //}
+                let mut serial = SERIAL.borrow(cs).borrow_mut();
+                if !midi_out.is_empty() {
+                    serial.as_mut().unwrap().write_byte(midi_out[0]);
+                    let mut midi = MIDI_OUT.borrow(cs).borrow_mut();
+                    for &byte in midi_out[1..].iter().rev() {
+                        midi.push(byte);
+                    }
+                }
                 let mut midi = MIDI_IN.borrow(cs).borrow_mut();
-                //while let Ok(byte) = serial.as_mut().unwrap().read() {
-                //    midi.push(byte);
-                //}
+                while let Ok(byte) = serial.as_mut().unwrap().read() {
+                    midi.push(byte);
+                }
                 midi.drain(..).collect()
             });
-            let (audio, _midi) = synth.step(audio_in, &midi_in);
+            let (audio, midi) = synth.step(audio_in, &midi_in);
             tc0.ocr0b.write(|w| unsafe { w.bits(audio) });
             //ufmt::uwriteln!(&mut serial, "data: {}\r", audio_in);
-            //midi_out = midi;
+            midi_out = midi;
         }
         sleep();
     }
