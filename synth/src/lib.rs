@@ -541,7 +541,7 @@ impl Note {
     pub const SAMPLE_RATE: u16 = 9615;
 
     /// Base 2 logarithm of the frequency resolution.
-    pub const LOG_FREQUENCY_DIVISOR: u8 = 0;
+    pub const LOG_FREQUENCY_DIVISOR: u8 = 1;
 
     /// Multiple for the inverse wavelength lookup.
     const FREQUENCY_MULTIPLE: u16 = Self::SAMPLE_RATE << Self::LOG_FREQUENCY_DIVISOR;
