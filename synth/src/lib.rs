@@ -100,13 +100,13 @@ impl Waves {
         if t << 1 <= k {
             i16::MIN
         } else {
-            i16::MAX - 1
+            i16::MAX
         }
     }
 
     /// A waveform resembling the teeth of a plain toothed saw.
     const fn sawtooth(t: i16, k: i16) -> i16 {
-        (((i16::MAX - 1) / k) * (t - (k >> 1))) << 1
+        ((i16::MAX / k) * (t - (k >> 1))) << 1
     }
 
     /// A piecwise linear triangle shaped waveform.
@@ -579,9 +579,6 @@ mod tests {
     use proptest::prelude::*;
     use wmidi::{Channel, MidiMessage, PitchBend, ProgramNumber, Velocity};
 
-    /// Smallest pitch bend.
-    const PITCH_BEND_MULTIPLE: u16 = 1 << (12 - Note::LOG_NUM_BENDS);
-
     /// Check that converting wavelength to frequency to pitch to wavelength works.
     #[test]
     fn lookup() {
@@ -614,6 +611,7 @@ mod tests {
         fn roundtrip(l: u8, h: u8, program_number in 0_u8..2, pitch_bend in 0_u16..(1 << Note::LOG_NUM_BENDS), note in 39_u8..80, velocity in 7_u8..22, off_velocity in 2_u8..0x80) {
             const MIDPOINT_OUT: u8 = 0x80;
             const OUT_BITS: u8 = 2;
+            const PITCH_BEND_MULTIPLE: u16 = 1 << (12 - Note::LOG_NUM_BENDS);
             let program_number = ProgramNumber::from_u8_lossy(program_number);
             let pitch_bend = PitchBend::try_from(Note::PITCH_BEND_OFFSET + PITCH_BEND_MULTIPLE * pitch_bend).unwrap();
             let note = wmidi::Note::from_u8_lossy(note);
