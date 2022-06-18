@@ -22,15 +22,10 @@ const MIDPOINT: u16 = 0x200;
 /// The number of bytes in a midi message.
 const MIDI_MESSAGE_LEN: usize = 3;
 
-/// Logarithm of the maximum time window.
-const MAX_LOG_WINDOW: u8 = 7;
-
 /// Logarithm of the time window.
 const LOG_WINDOW: u8 = 7;
 
 static_assertions::const_assert!(LOG_WINDOW > 1);
-
-static_assertions::const_assert!(LOG_WINDOW <= MAX_LOG_WINDOW);
 
 /// Digital signal processor.
 #[derive(Default)]
@@ -453,6 +448,8 @@ impl AmplitudeTracker {
 
     /// Takes the mean of the absolute values of the audio wave.
     fn calculate(&self) -> Velocity {
+        const MAX_LOG_WINDOW: u8 = 7;
+        static_assertions::const_assert!(LOG_WINDOW <= MAX_LOG_WINDOW);
         let v = if LOG_WINDOW == MAX_LOG_WINDOW {
             self.0 >> 1
         } else {
