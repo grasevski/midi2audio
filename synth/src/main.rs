@@ -7,7 +7,7 @@ use synth::Note;
 const NUM_NOTES: usize = 0x800 << Note::LOG_FREQUENCY_DIVISOR;
 
 /// The number of distinct wavelengths represented by midi notes.
-const NUM_WAVELENGTHS: usize = 0x80 << Note::LOG_NUM_BENDS;
+const NUM_WAVELENGTHS: usize = 0x100 << Note::LOG_NUM_BENDS;
 
 /// Maps a given frequency to its pitch.
 #[allow(clippy::cast_possible_truncation)]
@@ -24,7 +24,7 @@ fn lookup(frequency: usize) -> i16 {
 fn lookup_wavelength(pitch: usize) -> i16 {
     let p = i16::try_from(pitch).unwrap()
         - (i16::from(u8::from(Note::BASE_NOTE)) << Note::LOG_NUM_BENDS);
-    (f64::try_from(Note::SAMPLE_RATE).unwrap()
+    (f64::try_from(u32::from(Note::SAMPLE_RATE) << Note::WAVELENGTH_BITS).unwrap()
         / (Note::BASE_FREQUENCY
             * (f64::try_from(p).unwrap() / f64::try_from(Note::OCTAVE).unwrap()).exp2()))
     .round() as i16

@@ -106,17 +106,12 @@ impl Waves {
 
     /// A waveform resembling the teeth of a plain toothed saw.
     const fn sawtooth(t: i16, k: i16) -> i16 {
-        ((i16::MAX - 1) / k) * ((t << 1) - k)
+        (((i16::MAX - 1) / k) * (t - (k >> 1))) << 1
     }
 
     /// A piecwise linear triangle shaped waveform.
     const fn triangle(t: i16, k: i16) -> i16 {
-        let x = if t <= k >> 1 {
-            (t << 2) - k
-        } else {
-            k + (k << 1) - (t << 2)
-        };
-        ((i16::MAX - 1) / k) * x
+        (Self::sawtooth(t, k).abs() - (i16::MAX >> 1)) << 1
     }
 }
 
@@ -281,7 +276,7 @@ impl Oscillator {
 
     /// Generates the next sample.
     fn step(&mut self, w: &[Wave]) -> i16 {
-        self.t = (self.t + 1) % self.k;
+        self.t = (self.t + (1 << Note::WAVELENGTH_BITS)) % self.k;
         let (n, mut x) = (i16::try_from(w.len()).unwrap(), 0);
         for f in w {
             x += f(self.t, self.k) / n;
@@ -526,7 +521,7 @@ pub struct Note {
 
 impl Note {
     /// Base 2 logarithm of the number of subdivisions per semitone.
-    pub const LOG_NUM_BENDS: u8 = 0;
+    pub const LOG_NUM_BENDS: u8 = 1;
 
     /// The number of subdivisions per octave.
     pub const OCTAVE: u8 = 12 << Self::LOG_NUM_BENDS;
@@ -540,6 +535,9 @@ impl Note {
     /// Number of audio samples per second.
     pub const SAMPLE_RATE: u16 = 9615;
 
+    /// Use the lower bits as the mantissa.
+    pub const WAVELENGTH_BITS: u8 = 5;
+
     /// Base 2 logarithm of the frequency resolution.
     pub const LOG_FREQUENCY_DIVISOR: u8 = 1;
 
@@ -550,7 +548,7 @@ impl Note {
     const SEMITONE: u16 = 0x1000;
 
     /// Pitch bend midpoint.
-    const PITCH_BEND_OFFSET: u16 = 2 * Self::SEMITONE;
+    const PITCH_BEND_OFFSET: u16 = Self::SEMITONE << 1;
 
     /// Tries to convert a frequency to a note.
     fn try_from_frequency(f: usize) -> Option<Self> {
@@ -590,7 +588,11 @@ mod tests {
         let base_note = usize::from(u8::from(Note::BASE_NOTE)) << Note::LOG_NUM_BENDS;
         let max_note = base_note + 5 * usize::from(Note::OCTAVE);
         for &actual in &lookup::WAVELENGTHS[base_note..max_note] {
-            let f = usize::from(Note::FREQUENCY_MULTIPLE / u16::try_from(actual).unwrap());
+            let f = usize::try_from(
+                (u32::from(Note::FREQUENCY_MULTIPLE) << Note::WAVELENGTH_BITS)
+                    / u32::try_from(actual).unwrap(),
+            )
+            .unwrap();
             let p = lookup::NOTES[f] + i16::try_from(base_note).unwrap();
             let expected = lookup::WAVELENGTHS[usize::try_from(p).unwrap()];
             assert_eq!(actual, expected);
@@ -600,7 +602,7 @@ mod tests {
     proptest! {
         /// Check that input is handled gracefully.
         #[test]
-        fn fuzz(steps in prop::collection::vec((0_u16..(2 * MIDPOINT), prop::collection::vec(0_u8.., 0..MIDI_CAP)), 0..1000)) {
+        fn fuzz(steps in prop::collection::vec((0_u16..(MIDPOINT << 1), prop::collection::vec(0_u8.., 0..MIDI_CAP)), 0..1000)) {
             let mut synth = Synth::default();
             for (audio_in, midi_in) in steps {
                 synth.step(audio_in, &Midi::try_from(&midi_in[..]).unwrap());
@@ -609,7 +611,7 @@ mod tests {
 
         /// Check that converting midi to audio and back works.
         #[test]
-        fn roundtrip(l: u8, h: u8, program_number in 0_u8..2, pitch_bend in 0_u16..(1 << Note::LOG_NUM_BENDS), note in 39_u8..74, velocity in 7_u8..22, off_velocity in 2_u8..0x80) {
+        fn roundtrip(l: u8, h: u8, program_number in 0_u8..2, pitch_bend in 0_u16..(1 << Note::LOG_NUM_BENDS), note in 39_u8..80, velocity in 7_u8..22, off_velocity in 2_u8..0x80) {
             const MIDPOINT_OUT: u8 = 0x80;
             const OUT_BITS: u8 = 2;
             let program_number = ProgramNumber::from_u8_lossy(program_number);
