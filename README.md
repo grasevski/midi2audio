@@ -1,2 +1,2 @@
-# midi2audio
-Arduino synthesizer that takes midi input and outputs mono audio
+# midiguitar
+Guitar midi controller + synthesizer using an STM32F303
