@@ -14,7 +14,7 @@ mod lookup;
 pub type Midi = ArrayVec<u8, MIDI_CAP>;
 
 /// Number of bytes that can be buffered.
-const MIDI_CAP: usize = 4;
+pub const MIDI_CAP: usize = 8;
 
 /// ADC midpoint reading.
 const MIDPOINT: u8 = 0x80;
@@ -40,7 +40,7 @@ pub struct Synth<'a> {
 
 impl Synth<'_> {
     /// Converts midi and audio to midi and audio.
-    pub fn step(&mut self, audio_in: u8, midi_in: &Midi) -> (u8, Midi) {
+    pub fn step(&mut self, audio_in: u8, midi_in: &[u8]) -> (u8, Midi) {
         let mut i = 0;
         while i < midi_in.len() {
             let j = i + min(self.midi.remaining_capacity(), midi_in.len() - i);
