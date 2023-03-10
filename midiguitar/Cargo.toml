@@ -5,12 +5,10 @@ edition = "2021"
 version = "0.1.0"
 
 [dependencies]
-defmt = "0.3.0"
-defmt-rtt = "0.3.0"
-panic-probe = { version = "0.3.0", features = ["print-defmt"] }
 cortex-m-rtic = "1.1"
 cortex-m = "0.7"
 stm32l4xx-hal = { version = "0.7.1", features = ["rt", "stm32l432"] }
+panic-halt = "0.2.0"
 synth = { path = "../synth" }
 
 # cargo build/run
@@ -38,7 +36,7 @@ debug = 2
 debug-assertions = false # <-
 incremental = false
 lto = 'fat'
-opt-level = "s" # <-
+opt-level = 3 # <-
 overflow-checks = false # <-
 
 # cargo test --release
@@ -48,7 +46,7 @@ debug = 2
 debug-assertions = false # <-
 incremental = false
 lto = 'fat'
-opt-level = "s" # <-
+opt-level = 3 # <-
 overflow-checks = false # <-
 
 # uncomment this to switch from the crates.io version of defmt to its git version

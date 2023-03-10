@@ -1,8 +1,7 @@
 //! Guitar midi controller.
 #![no_main]
 #![no_std]
-use defmt_rtt as _;
-use panic_probe as _;
+use panic_halt as _;
 use stm32l4xx_hal::{
     adc::{Event, SampleTime, Sequence, ADC},
     delay::DelayCM,
@@ -91,12 +90,6 @@ mod app {
         audio.set_output(audio_out);
         midi.write_slice(midi_out.as_slice());
     }
-}
-
-/// Debugging panic handler.
-#[defmt::panic_handler]
-fn panic() -> ! {
-    cortex_m::asm::udf()
 }
 
 /// Audio IO peripherals.
