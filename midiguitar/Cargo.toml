@@ -6,13 +6,10 @@ version = "0.1.0"
 
 [dependencies]
 cortex-m-rtic = "1.1"
-cortex-m = { version = "0.7", features = ["critical-section-single-core"] }
+cortex-m = "0.7"
 stm32l4xx-hal = { version = "0.7.1", features = ["rt", "stm32l432"] }
-#panic-halt = "0.2.0"
-panic-probe = { version = "0.3", features = ["print-defmt"] }
+panic-halt = "0.2.0"
 synth = { path = "../synth" }
-defmt = "0.3"
-defmt-rtt = "0.3"
 
 # cargo build/run
 [profile.dev]
