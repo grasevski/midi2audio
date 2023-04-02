@@ -1,9 +1,10 @@
 //! Guitar midi controller.
 #![no_main]
 #![no_std]
-use panic_halt as _;
+use defmt_rtt as _;
+use panic_probe as _;
 use stm32l4xx_hal::{
-    adc::{Event, SampleTime, Sequence, ADC},
+    adc::{Event, Resolution, SampleTime, Sequence, ADC},
     delay::DelayCM,
     dma::{dma1::Channels, CircBuffer, CircReadDma, DMAFrame, FrameSender},
     gpio::{Analog, PA3},
@@ -12,6 +13,11 @@ use stm32l4xx_hal::{
     serial::{Pins, RxDma1, Serial, TxDma1},
 };
 use synth::MIDI_CAP;
+
+#[defmt::panic_handler]
+fn panic() -> ! {
+    cortex_m::asm::udf()
+}
 
 #[rtic::app(device = stm32l4xx_hal::pac)]
 mod app {
@@ -89,6 +95,7 @@ mod app {
         let (audio_out, midi_out) = synth.step(audio_in, &midi_in[..n]);
         audio.set_output(audio_out);
         midi.write_slice(midi_out.as_slice());
+        defmt::println!("i={} o={}", audio_in, audio_out);
     }
 }
 
@@ -113,27 +120,25 @@ impl Audio {
         dac: DAC1,
     ) -> Self {
         DAC1::enable(&mut rcc.apb1r1);
+        dac.shhr.write(|w| unsafe { w.thold1().bits(0x1ff) });
+        dac.mcr.write(|w| unsafe { w.mode1().bits(0b100) });
+        dac.cr.write(|w| w.en1().set_bit());
+        OPAMP::enable(&mut rcc.apb1r1);
         opamp.opamp1_csr.write(|w| {
             unsafe {
                 w.pga_gain().bits(0b10);
                 w.vm_sel().bits(0b10);
-                w.opamode().bits(0b11);
+                w.opamode().bits(0b10);
             }
             w.opa_range().set_bit().opalpm().set_bit().opaen().set_bit()
         });
-        OPAMP::enable(&mut rcc.apb1r1);
-        adc_common.ccr.write(|w| unsafe { w.presc().bits(0b0010) });
-        adc1.cfgr.write(|w| w.cont().set_bit());
-        adc1.cfgr2.write(|w| {
-            unsafe { w.ovsr().bits(0b001).ovss().bits(0b0110) }
-                .rovse()
-                .set_bit()
-        });
         let mut delay = DelayCM::new(clocks);
+        adc_common.ccr.write(|w| unsafe { w.presc().bits(0b1011) });
+        adc1.cfgr.write(|w| w.cont().set_bit());
         let mut adc = ADC::new(adc1, adc_common, &mut rcc.ahb2, &mut rcc.ccipr, &mut delay);
-        adc.configure_sequence(&mut pa3, Sequence::One, SampleTime::Cycles640_5);
+        adc.set_resolution(Resolution::Bits8);
+        adc.configure_sequence(&mut pa3, Sequence::One, SampleTime::Cycles24_5);
         adc.listen(Event::EndOfRegularSequence);
-        adc.enable();
         adc.start_conversion();
         Self { adc, dac }
     }
@@ -141,12 +146,13 @@ impl Audio {
     /// Reads the current input signal.
     fn get_input(&mut self) -> u8 {
         let ret = self.adc.get_data();
-        self.adc.clear_end_flags();
+        self.adc.start_conversion();
         ret.try_into().unwrap()
     }
 
     /// Writes the output signal.
     fn set_output(&mut self, out: u8) {
+        self.dac.swtrigr.write(|w| w.swtrig1().set_bit());
         self.dac.dhr8r1.write(|w| unsafe { w.dacc1dhr().bits(out) });
     }
 }
@@ -186,11 +192,10 @@ impl Midi {
     /// Writes the midi bytes to DMA.
     fn write_slice(&mut self, midi_out: &[u8]) {
         if midi_out.is_empty() {
-            return;
+        } else if let Some(buf) = self.buf.take() {
+            buf.clear();
+            buf.write_slice(midi_out);
+            self.tx.send(buf).unwrap();
         }
-        let buf = self.buf.take().unwrap();
-        buf.clear();
-        buf.write_slice(midi_out);
-        self.tx.send(buf).unwrap();
     }
 }

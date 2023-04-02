@@ -530,7 +530,7 @@ impl Note {
     pub const BASE_FREQUENCY: f64 = 55.0;
 
     /// Number of audio samples per second.
-    pub const SAMPLE_RATE: u16 = 9615;
+    pub const SAMPLE_RATE: u16 = 9469;
 
     /// Use the lower bits as the mantissa.
     pub const WAVELENGTH_BITS: u8 = 5;
