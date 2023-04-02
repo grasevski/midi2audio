@@ -1,7 +1,8 @@
 //! Guitar midi controller.
 #![no_main]
 #![no_std]
-use panic_halt as _;
+use defmt_rtt as _;
+use panic_probe as _;
 use stm32l4xx_hal::{
     adc::{Event, Resolution, SampleTime, Sequence, ADC},
     delay::DelayCM,
@@ -12,6 +13,11 @@ use stm32l4xx_hal::{
     serial::{Pins, RxDma1, Serial, TxDma1},
 };
 use synth::MIDI_CAP;
+
+#[defmt::panic_handler]
+fn panic() -> ! {
+    cortex_m::asm::udf()
+}
 
 #[rtic::app(device = stm32l4xx_hal::pac)]
 mod app {
@@ -89,6 +95,7 @@ mod app {
         let (audio_out, midi_out) = synth.step(audio_in, &midi_in[..n]);
         audio.set_output(audio_out);
         midi.write_slice(midi_out.as_slice());
+        defmt::println!("i={} o={}", audio_in, audio_out);
     }
 }
 
