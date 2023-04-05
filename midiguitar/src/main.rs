@@ -27,7 +27,7 @@ mod app {
         prelude::*,
         serial::{Config, Serial},
     };
-    use synth::{Synth, MIDI_CAP};
+    use synth::Synth;
 
     /// Shared resources.
     #[shared]
@@ -90,12 +90,12 @@ mod app {
     fn adc1_2(cx: adc1_2::Context) {
         let adc1_2::LocalResources { audio, midi, synth } = cx.local;
         let audio_in = audio.get_input();
-        let mut midi_in = [0; MIDI_CAP];
+        let mut midi_in = [0];
         let n = midi.read(&mut midi_in[..]);
         let (audio_out, midi_out) = synth.step(audio_in, &midi_in[..n]);
         audio.set_output(audio_out);
-        //midi.write_slice(&midi_out[..]);
-        midi.write_slice(&[0]);
+        midi.write_slice(&midi_out[..]);
+        defmt::println!("i={} mi={} o={} mo={}", audio_in, &midi_in[..n], audio_out, &midi_out[..]);
     }
 }
 
@@ -166,13 +166,13 @@ pub struct Midi {
     buf: Option<&'static mut DMAFrame<MIDI_CAP>>,
 
     /// Midi input buffer.
-    rx: CircBuffer<[u8; MIDI_CAP], RxDma1>,
+    rx: CircBuffer<[u8; 1], RxDma1>,
 }
 
 impl Midi {
     /// Initializes the UART interfaces.
     fn new(serial: Serial<USART1, impl Pins<USART1>>, channels: Channels) -> Self {
-        static mut RX: [u8; MIDI_CAP] = [0; MIDI_CAP];
+        static mut RX: [u8; 1] = [0];
         static mut TX: DMAFrame<MIDI_CAP> = DMAFrame::new();
         let (tx, rx) = serial.split();
         let tx = tx.with_dma(channels.4).frame_sender();
