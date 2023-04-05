@@ -1,10 +1,7 @@
 //! Synthesizer unit testable logic.
 #![cfg_attr(not(test), no_std)]
 use arrayvec::ArrayVec;
-use core::{
-    cmp::{max, min},
-    convert::{TryFrom, TryInto},
-};
+use core::{cmp::max, convert::{TryFrom, TryInto}};
 use wmidi::{Channel, FromBytesError, MidiMessage, PitchBend, ProgramNumber, Velocity};
 
 /// Precomputed tables to get pitch and wavelength.
@@ -14,66 +11,56 @@ mod lookup;
 pub type Midi = ArrayVec<u8, MIDI_CAP>;
 
 /// Number of bytes that can be buffered.
-pub const MIDI_CAP: usize = 8;
+pub const MIDI_CAP: usize = MidiController::MIDI_MAX_MESSAGES * Synth::MIDI_MESSAGE_LEN;
 
 /// ADC midpoint reading.
 const MIDPOINT: u8 = 0x80;
-
-/// The number of bytes in a midi message.
-const MIDI_MESSAGE_LEN: usize = 3;
 
 /// Logarithm of the time window.
 const LOG_WINDOW: u8 = 7;
 
 /// Digital signal processor.
 #[derive(Default)]
-pub struct Synth<'a> {
+pub struct Synth {
     /// Converts audio to midi.
-    controller: MidiController<'a>,
+    controller: MidiController,
 
     /// Converts midi to audio.
     synth: SubtractiveSynth,
 
     /// Midi input buffer.
-    midi: ArrayVec<u8, MIDI_MESSAGE_LEN>,
+    midi: ArrayVec<u8, { Self::MIDI_MESSAGE_LEN }>,
 }
 
-impl Synth<'_> {
+impl Synth {
+    /// The number of bytes in a midi message.
+    const MIDI_MESSAGE_LEN: usize = 3;
+
     /// Converts midi and audio to midi and audio.
     pub fn step(&mut self, audio_in: u8, midi_in: &[u8]) -> (u8, Midi) {
-        let mut i = 0;
-        while i < midi_in.len() {
-            let j = i + min(self.midi.remaining_capacity(), midi_in.len() - i);
-            self.midi.try_extend_from_slice(&midi_in[i..j]).unwrap();
+        for x in midi_in {
+            self.midi.push(*x);
             match MidiMessage::try_from(&self.midi[..]) {
                 Ok(midi) => {
                     self.synth.read(&midi);
                     self.midi.clear();
-                    i = j;
                 }
-                Err(err) => match err {
-                    FromBytesError::NoBytes | FromBytesError::NotEnoughBytes => {
-                        break;
-                    }
-                    _ => {
-                        self.midi.remove(0);
-                        i = j;
-                    }
-                },
+                Err(err) => if !matches!(err, FromBytesError::NoBytes | FromBytesError::NotEnoughBytes) {
+                    self.midi.remove(0);
+                }
             }
         }
-        let midi_out = self
-            .controller
-            .step(audio_in)
-            .as_ref()
-            .map_or(Midi::new_const(), Self::serialize_midi);
+        let midi_out = Self::serialize_midi(&self.controller.step(audio_in));
         (self.synth.step(), midi_out)
     }
 
-    /// Converts midi message to bytes.
-    fn serialize_midi(midi: &MidiMessage) -> Midi {
-        let mut midi_out = Midi::try_from(&[0; MIDI_MESSAGE_LEN][..]).unwrap();
-        midi.copy_to_slice(&mut midi_out[..]).unwrap();
+    /// Converts midi messages to bytes.
+    fn serialize_midi(msgs: &[MidiMessage]) -> Midi {
+        let (mut midi_out, mut n) = (Midi::from([0; MIDI_CAP]), 0);
+        for x in msgs {
+            n += x.copy_to_slice(&mut midi_out[n..]).unwrap();
+        }
+        midi_out.truncate(n);
         midi_out
     }
 }
@@ -360,7 +347,7 @@ impl HighPassFilter {
 
 /// Converts audio to midi.
 #[derive(Default)]
-struct MidiController<'a> {
+struct MidiController {
     /// Time counter.
     t: u8,
 
@@ -375,22 +362,23 @@ struct MidiController<'a> {
 
     /// Calculates the frequency over time.
     frequency: FrequencyTracker,
-
-    /// Midi output buffer.
-    msgs: ArrayVec<MidiMessage<'a>, 3>,
 }
 
-impl MidiController<'_> {
+impl MidiController {
+    /// Maximum number of midi messages to send in one go.
+    const MIDI_MAX_MESSAGES: usize = 3;
+
     /// Generates the next midi event.
-    fn step(&mut self, audio_in: u8) -> Option<MidiMessage> {
+    fn step(&mut self, audio_in: u8) -> ArrayVec<MidiMessage, { Self::MIDI_MAX_MESSAGES }> {
         self.t += 1;
         self.amplitude.step(audio_in);
         let audio_in = i16::try_from(audio_in).unwrap() - i16::try_from(MIDPOINT).unwrap();
         let audio_in = self.filter.step(i8::try_from(audio_in).unwrap());
         let audio_in = (audio_in >> 8) + i16::try_from(MIDPOINT).unwrap();
         self.frequency.step(u8::try_from(audio_in).unwrap());
+        let mut ret = ArrayVec::new_const();
         if self.t < 1 << LOG_WINDOW {
-            return self.msgs.pop();
+            return ret;
         }
         let a = self.amplitude.calculate();
         let f = self.frequency.calculate();
@@ -402,31 +390,27 @@ impl MidiController<'_> {
             if let Some(p) = self.f {
                 let (p_note, f_note) = (u8::from(p.note), u8::from(f.note));
                 if p_note >= f_note - 2 && p_note <= f_note + 1 {
-                    self.msgs
-                        .push(MidiMessage::ChannelPressure(Channel::Ch1, a));
                     let pitch_bend = i16::try_from(u16::from(f.pitch_bend)).unwrap()
                         + 0x1000 * (i16::from(p_note) - i16::from(f_note));
                     let pitch_bend =
                         PitchBend::try_from(u16::try_from(pitch_bend).unwrap()).unwrap();
-                    self.msgs
-                        .push(MidiMessage::PitchBendChange(Channel::Ch1, pitch_bend));
+                    ret.push(MidiMessage::PitchBendChange(Channel::Ch1, pitch_bend));
+                    ret.push(MidiMessage::ChannelPressure(Channel::Ch1, a));
                 } else {
-                    self.msgs.push(note_on);
-                    self.msgs.push(pitch_bend_change);
-                    self.msgs
-                        .push(MidiMessage::NoteOff(Channel::Ch1, p.note, a));
+                    ret.push(MidiMessage::NoteOff(Channel::Ch1, p.note, a));
+                    ret.push(pitch_bend_change);
+                    ret.push(note_on);
                 }
             } else {
-                self.msgs.push(note_on);
-                self.msgs.push(pitch_bend_change);
+                ret.push(pitch_bend_change);
+                ret.push(note_on);
             }
         } else if let Some(f) = self.f {
-            self.msgs
-                .push(MidiMessage::NoteOff(Channel::Ch1, f.note, a));
+            ret.push(MidiMessage::NoteOff(Channel::Ch1, f.note, a));
         }
         self.f = f;
         self.t = 0;
-        self.msgs.pop()
+        ret
     }
 }
 
@@ -571,7 +555,7 @@ impl Note {
 
 #[cfg(test)]
 mod tests {
-    use super::{lookup, Midi, Note, Synth, LOG_WINDOW, MIDI_CAP, MIDPOINT};
+    use super::{lookup, Note, Synth, LOG_WINDOW, MIDI_CAP, MIDPOINT};
     use core::convert::TryFrom;
     use proptest::prelude::*;
     use wmidi::{Channel, MidiMessage, PitchBend, ProgramNumber, Velocity};
@@ -599,13 +583,13 @@ mod tests {
         fn fuzz(steps in prop::collection::vec((0_u8.., prop::collection::vec(0_u8.., 0..MIDI_CAP)), 0..1000)) {
             let mut synth = Synth::default();
             for (audio_in, midi_in) in steps {
-                synth.step(audio_in, &Midi::try_from(&midi_in[..]).unwrap());
+                synth.step(audio_in, &midi_in);
             }
         }
 
         /// Check that converting midi to audio and back works.
         #[test]
-        fn roundtrip(l: u8, h: u8, program_number in 0_u8..2, pitch_bend in 0_u16..(1 << Note::LOG_NUM_BENDS), note in 39_u8..80, velocity in 7_u8..22, off_velocity in 2_u8..0x80) {
+        fn roundtrip(program_number in 0_u8..2, pitch_bend in 0_u16..(1 << Note::LOG_NUM_BENDS), note in 39_u8..80, velocity in 7_u8..22, off_velocity in 2_u8..0x80) {
             const PITCH_BEND_MULTIPLE: u16 = 1 << (12 - Note::LOG_NUM_BENDS);
             let program_number = ProgramNumber::from_u8_lossy(program_number);
             let pitch_bend = PitchBend::try_from(Note::PITCH_BEND_OFFSET + PITCH_BEND_MULTIPLE * pitch_bend).unwrap();
@@ -613,85 +597,73 @@ mod tests {
             let velocity = Velocity::from_u8_lossy(velocity);
             let off_velocity = Velocity::from_u8_lossy(off_velocity);
             let (mut midi2audio, mut audio2midi) = (Synth::default(), Synth::default());
-            let msg = MidiMessage::ProgramChange(Channel::Ch1, program_number);
-            let midi_in = Synth::serialize_midi(&msg);
-            let (_, midi_out) = midi2audio.step(MIDPOINT, &midi_in);
+            let program_change = MidiMessage::ProgramChange(Channel::Ch1, program_number);
+            let pitch_bend = MidiMessage::PitchBendChange(Channel::Ch1, pitch_bend);
+            let note_on = MidiMessage::NoteOn(Channel::Ch1, note, velocity);
+            let midi_in = [program_change, pitch_bend.clone(), note_on.clone()];
+            let (audio_out, midi_out) = midi2audio.step(MIDPOINT, &Synth::serialize_midi(&midi_in));
             prop_assert!(midi_out.is_empty());
-            let msg = MidiMessage::PitchBendChange(Channel::Ch1, pitch_bend);
-            let pitch_bend = Synth::serialize_midi(&msg);
-            let (_, midi_out) = midi2audio.step(MIDPOINT, &pitch_bend);
-            prop_assert!(midi_out.is_empty());
-            let msg = MidiMessage::NoteOn(Channel::Ch1, note, velocity);
-            let note_on = Synth::serialize_midi(&msg);
-            let (audio_out, midi_out) = midi2audio.step(MIDPOINT, &note_on);
-            prop_assert!(midi_out.is_empty());
-            let (audio_out, midi_out) = audio2midi.step(audio_out, &midi_out);
+            let (audio_out, midi_out) = audio2midi.step(audio_out, &[]);
             prop_assert_eq!(audio_out, MIDPOINT);
             prop_assert!(midi_out.is_empty());
-            let midi_in = Midi::default();
             for _ in 0..((1 << LOG_WINDOW) - 2) {
-                let (audio_out, midi_out) = midi2audio.step(MIDPOINT, &midi_in);
+                let (audio_out, midi_out) = midi2audio.step(MIDPOINT, &[]);
                 prop_assert!(midi_out.is_empty());
-                let (audio_out, midi_out) = audio2midi.step(audio_out, &midi_out);
+                let (audio_out, midi_out) = audio2midi.step(audio_out, &[]);
                 prop_assert_eq!(audio_out, MIDPOINT);
                 prop_assert!(midi_out.is_empty());
             }
-            let (audio_out, midi_out) = midi2audio.step(MIDPOINT, &midi_in);
+            let (audio_out, midi_out) = midi2audio.step(MIDPOINT, &[]);
             prop_assert!(midi_out.is_empty());
-            let (audio_out, midi_out) = audio2midi.step(audio_out, &midi_out);
+            let (audio_out, midi_out) = audio2midi.step(audio_out, &[]);
             prop_assert_eq!(audio_out, MIDPOINT);
-            prop_assert_eq!(&midi_out, &pitch_bend);
-            let (audio_out, midi_out) = midi2audio.step(MIDPOINT, &midi_in);
-            prop_assert!(midi_out.is_empty());
-            let (audio_out, midi_out) = audio2midi.step(audio_out, &midi_out);
-            prop_assert_eq!(audio_out, MIDPOINT);
-            prop_assert_eq!(&midi_out[0..2], &note_on[0..2]);
-            let msg = MidiMessage::ChannelPressure(Channel::Ch1, velocity);
-            let channel_pressure = Synth::serialize_midi(&msg);
+            let note_on = Synth::serialize_midi(&[pitch_bend.clone(), note_on]);
+            prop_assert_eq!(&midi_out[..5], &note_on[..5]);
             let msg = MidiMessage::NoteOff(Channel::Ch1, note, off_velocity);
-            let note_off = Synth::serialize_midi(&msg);
-            let (_, midi_out) = midi2audio.step(MIDPOINT, &note_off);
+            let note_off = Synth::serialize_midi(&[msg]);
+            let (audio_out, midi_out) = midi2audio.step(MIDPOINT, &note_off);
             prop_assert!(midi_out.is_empty());
-            let (audio_out, midi_out) = audio2midi.step(audio_out, &midi_out);
+            let (audio_out, midi_out) = audio2midi.step(audio_out, &[]);
             prop_assert_eq!(audio_out, MIDPOINT);
             prop_assert!(midi_out.is_empty());
-            for _ in 0..((1 << LOG_WINDOW) - 3) {
-                let (audio_out, midi_out) = midi2audio.step(MIDPOINT, &midi_in);
+            for _ in 0..((1 << LOG_WINDOW) - 2) {
+                let (audio_out, midi_out) = midi2audio.step(MIDPOINT, &[]);
                 prop_assert!(midi_out.is_empty());
-                let (audio_out, midi_out) = audio2midi.step(audio_out, &midi_out);
+                let (audio_out, midi_out) = audio2midi.step(audio_out, &[]);
                 prop_assert_eq!(audio_out, MIDPOINT);
                 prop_assert!(midi_out.is_empty());
             }
+            let channel_pressure = MidiMessage::ChannelPressure(Channel::Ch1, velocity);
+            let mut channel_pressure = Synth::serialize_midi(&[pitch_bend, channel_pressure]);
+            channel_pressure[2] = 0;
+            channel_pressure[4] = 0;
             let velocity = u16::from(u8::from(velocity));
             let off_velocity = u16::from(u8::from(off_velocity));
             for _ in 0..(velocity/(off_velocity << LOG_WINDOW)) {
-                let (audio_out, midi_out) = midi2audio.step(MIDPOINT, &midi_in);
+                let (audio_out, midi_out) = midi2audio.step(MIDPOINT, &[]);
                 prop_assert!(midi_out.is_empty());
-                let (audio_out, midi_out) = audio2midi.step(audio_out, &midi_out);
+                let (audio_out, mut midi_out) = audio2midi.step(audio_out, &[]);
                 prop_assert_eq!(audio_out, MIDPOINT);
-                prop_assert_eq!(&midi_out, &pitch_bend);
-                let (audio_out, midi_out) = midi2audio.step(MIDPOINT, &midi_in);
-                prop_assert!(midi_out.is_empty());
-                let (audio_out, midi_out) = audio2midi.step(audio_out, &midi_out);
-                prop_assert_eq!(audio_out, MIDPOINT);
-                prop_assert_eq!(&midi_out[0..2], &channel_pressure[0..2]);
-                for _ in 0..((1 << LOG_WINDOW) - 2) {
-                    let (audio_out, midi_out) = midi2audio.step(MIDPOINT, &midi_in);
+                midi_out[2] = 0;
+                midi_out[4] = 0;
+                prop_assert_eq!(&midi_out, &channel_pressure);
+                for _ in 0..((1 << LOG_WINDOW) - 1) {
+                    let (audio_out, midi_out) = midi2audio.step(MIDPOINT, &[]);
                     prop_assert!(midi_out.is_empty());
-                    let (audio_out, midi_out) = audio2midi.step(audio_out, &midi_out);
+                    let (audio_out, midi_out) = audio2midi.step(audio_out, &[]);
                     prop_assert_eq!(audio_out, MIDPOINT);
                     prop_assert!(midi_out.is_empty());
                 }
             }
-            let (audio_out, midi_out) = midi2audio.step(MIDPOINT, &midi_in);
+            let (audio_out, midi_out) = midi2audio.step(MIDPOINT, &[]);
             prop_assert!(midi_out.is_empty());
-            let (audio_out, midi_out) = audio2midi.step(audio_out, &midi_out);
+            let (audio_out, midi_out) = audio2midi.step(audio_out, &[]);
             prop_assert_eq!(audio_out, MIDPOINT);
-            prop_assert_eq!(&midi_out[0..2], &note_off[0..2]);
+            prop_assert_eq!(&midi_out[..2], &note_off[..2]);
             for _ in 0..((1 << LOG_WINDOW) - 1) {
-                let (audio_out, midi_out) = midi2audio.step(MIDPOINT, &midi_in);
+                let (audio_out, midi_out) = midi2audio.step(MIDPOINT, &[]);
                 prop_assert!(midi_out.is_empty());
-                let (audio_out, midi_out) = audio2midi.step(audio_out, &midi_out);
+                let (audio_out, midi_out) = audio2midi.step(audio_out, &[]);
                 prop_assert_eq!(audio_out, MIDPOINT);
                 prop_assert!(midi_out.is_empty());
             }

@@ -43,7 +43,7 @@ mod app {
         midi: Midi,
 
         /// Software digital signal processor.
-        synth: Synth<'static>,
+        synth: Synth,
     }
 
     impl From<Peripherals> for Local {
@@ -94,8 +94,8 @@ mod app {
         let n = midi.read(&mut midi_in[..]);
         let (audio_out, midi_out) = synth.step(audio_in, &midi_in[..n]);
         audio.set_output(audio_out);
-        midi.write_slice(midi_out.as_slice());
-        defmt::println!("i={} o={}", audio_in, audio_out);
+        //midi.write_slice(&midi_out[..]);
+        midi.write_slice(&[0]);
     }
 }
 
@@ -192,10 +192,11 @@ impl Midi {
     /// Writes the midi bytes to DMA.
     fn write_slice(&mut self, midi_out: &[u8]) {
         if midi_out.is_empty() {
-        } else if let Some(buf) = self.buf.take() {
-            buf.clear();
-            buf.write_slice(midi_out);
-            self.tx.send(buf).unwrap();
+            return;
         }
+        let buf = self.buf.take().unwrap();
+        buf.clear();
+        buf.write_slice(midi_out);
+        self.tx.send(buf).unwrap();
     }
 }
