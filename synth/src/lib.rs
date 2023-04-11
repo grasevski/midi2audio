@@ -589,7 +589,7 @@ mod tests {
 
         /// Check that converting midi to audio and back works.
         #[test]
-        fn roundtrip(program_number in 0_u8..2, pitch_bend in 0_u16..(1 << Note::LOG_NUM_BENDS), note in 39_u8..80, velocity in 7_u8..22, off_velocity in 2_u8..0x80) {
+        fn roundtrip(program_number in 0_u8..2, pitch_bend in 0_u16..(1 << Note::LOG_NUM_BENDS), note in 39_u8..92, velocity in 7_u8..22, off_velocity in 2_u8..0x80) {
             const PITCH_BEND_MULTIPLE: u16 = 1 << (12 - Note::LOG_NUM_BENDS);
             let program_number = ProgramNumber::from_u8_lossy(program_number);
             let pitch_bend = PitchBend::try_from(Note::PITCH_BEND_OFFSET + PITCH_BEND_MULTIPLE * pitch_bend).unwrap();
