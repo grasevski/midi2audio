@@ -1,7 +1,10 @@
 //! Synthesizer unit testable logic.
 #![cfg_attr(not(test), no_std)]
 use arrayvec::ArrayVec;
-use core::{cmp::max, convert::{TryFrom, TryInto}};
+use core::{
+    cmp::max,
+    convert::{TryFrom, TryInto},
+};
 use wmidi::{Channel, FromBytesError, MidiMessage, PitchBend, ProgramNumber, Velocity};
 
 /// Precomputed tables to get pitch and wavelength.
@@ -45,8 +48,13 @@ impl Synth {
                     self.synth.read(&midi);
                     self.midi.clear();
                 }
-                Err(err) => if !matches!(err, FromBytesError::NoBytes | FromBytesError::NotEnoughBytes) {
-                    self.midi.remove(0);
+                Err(err) => {
+                    if !matches!(
+                        err,
+                        FromBytesError::NoBytes | FromBytesError::NotEnoughBytes
+                    ) {
+                        self.midi.remove(0);
+                    }
                 }
             }
         }
@@ -540,15 +548,13 @@ impl Note {
         if p < 0 {
             return None;
         }
-        let p = u16::try_from(p).unwrap();
+        let p = u8::try_from(p).unwrap();
         let pitch_bend = (Self::PITCH_BEND_OFFSET
-            + ((p & ((1 << Self::LOG_NUM_BENDS) - 1)) << (12 - Self::LOG_NUM_BENDS)))
+            + ((u16::from(p) & ((1 << Self::LOG_NUM_BENDS) - 1)) << (12 - Self::LOG_NUM_BENDS)))
             .try_into()
             .unwrap();
-        let note = wmidi::Note::try_from(
-            u8::from(Self::BASE_NOTE) + u8::try_from(p >> Self::LOG_NUM_BENDS).unwrap(),
-        )
-        .unwrap();
+        let note =
+            wmidi::Note::try_from(u8::from(Self::BASE_NOTE) + (p >> Self::LOG_NUM_BENDS)).unwrap();
         Some(Self { note, pitch_bend })
     }
 }
@@ -571,8 +577,8 @@ mod tests {
                     / u32::try_from(actual).unwrap(),
             )
             .unwrap();
-            let p = lookup::NOTES[f] + i16::try_from(base_note).unwrap();
-            let expected = lookup::WAVELENGTHS[usize::try_from(p).unwrap()];
+            let p = usize::try_from(lookup::NOTES[f]).unwrap() + base_note;
+            let expected = lookup::WAVELENGTHS[p];
             assert_eq!(actual, expected);
         }
     }

@@ -7,9 +7,10 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-arrayvec = { version = "0.7.2", default-features = false }
-static_assertions = "1.1.0"
-wmidi = { version = "4.0.6", default-features = false }
+arrayvec = { version = "0.7", default-features = false }
+clap = { version = "4.4", features = ["derive"] }
+static_assertions = "1.1"
+wmidi = { version = "4.0", default-features = false }
 
 [dev-dependencies]
 proptest = "1.0.0"
