@@ -8,9 +8,13 @@ edition = "2018"
 
 [dependencies]
 arrayvec = { version = "0.7", default-features = false }
-clap = { version = "4.4", features = ["derive"] }
+fastf0nls = { path = "../fastf0nls" }
+micromath = "2.1"
 static_assertions = "1.1"
 wmidi = { version = "4.0", default-features = false }
+
+[target.x86_64-unknown-linux-musl.dependencies]
+clap = { version = "4.4", features = ["derive"] }
 
 [dev-dependencies]
 proptest = "1.0.0"

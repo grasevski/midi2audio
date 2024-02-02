@@ -1,73 +1,69 @@
 #include "fastf0nls.h"
+#include "arm_math.h"
 #include "lookup.h"
-#include <math.h>
-#define MIN(A, B) (A < B ? A : B)
-
-/// Packs x from step s to unit stride in y.
-static void cvmd_pack(int n, float x[], int s, float y[n]) {
-  for (int i = 0; i < n; ++i)
-    y[i] = x[s * i];
-}
+#include <stdbool.h>
 
 /// Updates least squares solution for the given order.
 static void update_ls_sol(int order, int nPitches, int nPitchesOld, bool add,
-                          const float dftData[nPitches],
+                          const float dftData[],
                           const float gamma[MAX_MODEL_ORDER * MP],
                           float lsSol[MP]) {
   const float s = add ? 1 : -1;
-  float lambda[nPitches] = {};
+  float lambda[nPitches], t[(order - 1) * nPitchesOld];
+  arm_fill_f32(0, lambda, nPitches);
   for (int k = 0; k < order - 1; ++k)
     for (int i = 0; i < nPitches; ++i)
       lambda[i] +=
           lsSol[k * nPitchesOld + i] *
           (CC_VECTORS[order - 1 - k][i] + s * CC_VECTORS[order + 1 + k][i]);
-  arm_sub_f32(dftData, lambda, lambda, nPitches);
-  float t[(order - 1) * nPitchesOld];
+  for (int i = 0; i < nPitches; ++i)
+    lambda[i] = dftData[(order << 1) * i] - lambda[i];
   arm_copy_f32(lsSol, t, (order - 1) * nPitchesOld);
   for (int k = 0; k < order - 1; ++k)
     for (int i = 0; i < nPitches; ++i)
       lsSol[k * nPitches + i] =
           t[k * nPitchesOld + i] +
           lambda[i] * gamma[MP * (order - 1) + k * nPitches + i];
-  arm_mult_f32(lambda, gamma + MP * nPitches * (order - 1),
+  arm_mult_f32(lambda, gamma + (MP + nPitches) * (order - 1),
                lsSol + (order - 1) * nPitches, nPitches);
 }
 
 /// Calculates omega for each model order.
 static void compute(const float x[SAMPLE_SIZE],
                     float omega_0h[MAX_MODEL_ORDER]) {
-  arm_cfft_instance_f32 fft;
-  arm_cfft_init_f32(&fft, SAMPLE_SIZE);
-  float p1[SAMPLE_SIZE << 1];
-  for (int i = 0; i < SAMPLE_SIZE; ++i) {
-    p1[2 * i] = x[i];
-    p1[2 * i + 1] = 0;
-  }
-  arm_cfft_f32(&fft, p1, 0, 0);
   float dftData[MP << 1];
-  arm_cmplx_mult_cmplx_f32(FFT_SHIFT_VECTOR, p1, dftData, N_FFT_GRID / 2 + 1);
-  int maxFftIndex = MAX_FFT_INDEX;
-  int nPitches = maxFftIndex - MIN_FFT_INDEX + 1;
+  {
+    arm_rfft_fast_instance_f32 fft;
+    FFT_INIT(&fft);
+    float p[N_FFT_GRID], p1[N_FFT_GRID << 1];
+    arm_copy_f32(x, p, SAMPLE_SIZE);
+    arm_fill_f32(0, p + SAMPLE_SIZE, N_FFT_GRID - SAMPLE_SIZE);
+    arm_rfft_fast_f32(&fft, p, p1, 0);
+    arm_cmplx_mult_cmplx_f32(FFT_SHIFT_VECTOR, p1, dftData, MP);
+  }
   float lsSol1[MP], lsSol2[MP];
+  int maxFftIndex = MAX_FFT_INDEX, nPitches = MAX_FFT_INDEX - MIN_FFT_INDEX + 1;
   for (int order = 1; order <= MAX_MODEL_ORDER; ++order) {
     const int maxFftIndexOld = maxFftIndex;
     maxFftIndex = MIN(MAX_FFT_INDEX, N_FFT_GRID / (2 * order) - 1);
     const int nPitchesOld = nPitches;
     nPitches -= maxFftIndexOld - maxFftIndex;
     const int maxPitchGrid = MIN_FFT_INDEX + nPitches - 1;
-    float t3[nPitches];
     if (order == 1) {
-      cvmd_pack(nPitches, dftData + MIN_FFT_INDEX * order, order << 1, t3);
-      arm_mult_f32(t3, gamma1, lsSol1, nPitches);
-      cvmd_pack(nPitches, dftData + MIN_FFT_INDEX * order + 1, order << 1, t3);
-      arm_mult_f32(t3, gamma2, lsSol2, nPitches);
+      for (int i = 0; i < nPitches; ++i) {
+        lsSol1[i] =
+            dftData[MIN_FFT_INDEX * order + (order << 1) * i] * GAMMA1[i];
+        lsSol2[i] =
+            dftData[MIN_FFT_INDEX * order + 1 + (order << 1) * i] * GAMMA2[i];
+      }
     } else {
-      cvmd_pack(nPitches, dftData + MIN_FFT_INDEX * order, order << 1, t3);
-      update_ls_sol(order, nPitches, nPitchesOld, true, t3, GAMMA1, lsSol1);
-      cvmd_pack(nPitches, dftData + MIN_FFT_INDEX * order + 1, order << 1, t3);
-      update_ls_sol(order, nPitches, nPitchesOld, false, t3, GAMMA2, lsSol2);
+      update_ls_sol(order, nPitches, nPitchesOld, true,
+                    dftData + MIN_FFT_INDEX * order, GAMMA1, lsSol1);
+      update_ls_sol(order, nPitches, nPitchesOld, false,
+                    dftData + MIN_FFT_INDEX * order + 1, GAMMA2, lsSol2);
     }
-    float costFunction[nPitches] = {};
+    float costFunction[nPitches];
+    arm_fill_f32(0, costFunction, nPitches);
     for (int k = 0; k < order; ++k) {
       for (int i = 0; i < nPitches; ++i) {
         costFunction[i] += dftData[MIN_FFT_INDEX * (k + 1) + 2 * (k + 1) * i] *
@@ -86,8 +82,8 @@ static void compute(const float x[SAMPLE_SIZE],
 
 /// Solves a linear system with coefficient matrix R = T + H.
 static void solve(int n, const float t[2 * (n + 1)], const float h[2 * (n - 1)],
-                  const float f[n], const float gam[(n + 1) * n / 2],
-                  const float x[n]) {
+                  const float f[n], const float gamma[(n + 1) * n / 2],
+                  float x[n]) {
   x[0] = f[0] / (t[0] + h[0]);
   for (int k = 1; k < n; ++k) {
     float lambda_k = f[k];
@@ -95,19 +91,18 @@ static void solve(int n, const float t[2 * (n + 1)], const float h[2 * (n - 1)],
       lambda_k -= x[i] * (t[k - i] + h[k + i]);
     x[k] = 0;
     for (int i = 0; i < k + 1; ++i)
-      x[i] += lambda_k * gam[(k + 1) * k / 2 + i];
+      x[i] += lambda_k * gamma[(k + 1) * k / 2 + i];
   }
 }
 
 /// Computes the gamma values for use in solve.
 static void th(int n, const float t[2 * (n + 2)], const float h[2 * n],
-               float gam[(n + 1) * (n + 2) / 2]) {
+               float gamma[(n + 1) * (n + 2) / 2]) {
   const float R00 = t[0] + h[0];
   gamma[0] = 1 / R00;
   if (n == 0)
     return;
-  const float R01 = t[1] + h[1];
-  const float R11 = t[0] + h[2];
+  const float R01 = t[1] + h[1], R11 = t[0] + h[2];
   const float s = 1 / (R00 * R11 - R01 * R01);
   gamma[1] = -s * R01;
   gamma[2] = s * R00;
@@ -131,14 +126,13 @@ static void th(int n, const float t[2 * (n + 2)], const float h[2 * n],
       mu_k -= t1 * psi_k[i];
     }
     alpha[k + 1] = 0;
-    float r_kp1[k + 1];
+    float nu_kp1 = 0, r_kp1[k + 1], b_k[k + 1];
     for (int i = 0; i < k + 1; ++i) {
       phi_k[i] += lambda_k * gamma[K + i];
       psi_k[i] += mu_k * gamma[K + i];
       r_kp1[i] = t[k + 1 - i] + h[k + 1 + i];
       alpha[k + 1] += r_kp1[i] * gamma[K + i];
     }
-    float b_k[k + 1];
     for (int i = 0; i < k + 1; ++i)
       b_k[i] = (alpha[k] - alpha[k + 1]) * gamma[K + i];
     for (int i = 0; i < k; ++i) {
@@ -146,7 +140,6 @@ static void th(int n, const float t[2 * (n + 2)], const float h[2 * n],
                 psi_k[k] * phi_k[i] - phi_k[k] * psi_k[i];
       b_k[i + 1] += gamma[K + i];
     }
-    float nu_kp1 = 0;
     for (int i = 0; i < k + 1; ++i)
       nu_kp1 += r_kp1[i] * b_k[i];
     nu_kp1 /= gamma[K + k];
@@ -159,13 +152,12 @@ static void th(int n, const float t[2 * (n + 2)], const float h[2 * n],
 
 /// Computes the gamma values for use in solve.
 static void thp(int n, const float t[2 * (n + 2)], const float h[2 * n],
-                float gam[(n + 1) * (n + 2) / 2]) {
+                float gamma[(n + 1) * (n + 2) / 2]) {
   const float R00 = t[0] + h[0];
   gamma[0] = 1 / R00;
   if (n == 0)
     return;
-  const float R01 = t[1] + h[1];
-  const float R11 = t[0] + h[2];
+  const float R01 = t[1] + h[1], R11 = t[0] + h[2];
   const float s = 1 / (R00 * R11 - R01 * R01);
   gamma[1] = -s * R01;
   gamma[2] = s * R00;
@@ -177,18 +169,17 @@ static void thp(int n, const float t[2 * (n + 2)], const float h[2 * n],
     const int K = Kp1;
     Kp1 = (k + 2) * (k + 1) / 2;
     alpha[k + 1] = 0;
+    float nu_kp1 = 0, r_kp1[k + 1], b_k[k + 1];
     for (int i = 0; i < k + 1; ++i) {
       r_kp1[i] = t[k + 1 - i] + h[k + 1 + i];
       alpha[k + 1] += r_kp1[i] * gamma[(k + 1) * k / 2 + i];
     }
-    float b_k[k + 1];
     for (int i = 0; i < k + 1; ++i)
       b_k[i] = (alpha[k] - alpha[k + 1]) * gamma[(k + 1) * k / 2 + i];
     for (int i = 0; i < k; ++i) {
       b_k[i] += gamma[K + 1 + i] - gamma[k * (k - 1) / 2 + i];
       b_k[i + 1] += gamma[K + i];
     }
-    float nu_kp1 = 0;
     for (int i = 0; i < k + 1; ++i)
       nu_kp1 += r_kp1[i] * b_k[i];
     nu_kp1 /= gamma[K + k];
@@ -202,14 +193,14 @@ static void thp(int n, const float t[2 * (n + 2)], const float h[2 * n],
 /// Compute the objective at omega, for data x, with given order.
 static float compute_obj(float omega, const float x[SAMPLE_SIZE], int order,
                          float ac[order], float as[order]) {
-  float t[2 * (order + 1)];
-  t[0] = nData;
+  float tmp = omega * -0.5 * (SAMPLE_SIZE - 1), t[2 * (order + 1)];
+  t[0] = SAMPLE_SIZE;
   for (int i = 1; i <= 2 * order + 1; ++i)
     t[i] = 0.5 * arm_sin_f32(0.5 * omega * SAMPLE_SIZE * i) /
            arm_sin_f32(0.5 * omega * i);
-  float cn[SAMPLE_SIZE], sn[SAMPLE_SIZE];
-  float bc[order] = {}, bs[order] = {};
-  float tmp = omega * -0.5 * (SAMPLE_SIZE - 1);
+  float cn[SAMPLE_SIZE], sn[SAMPLE_SIZE], bc[order], bs[order];
+  arm_fill_f32(0, bc, order);
+  arm_fill_f32(0, bs, order);
   for (int i = 0; i < SAMPLE_SIZE; ++i) {
     cn[i] = arm_cos_f32(tmp);
     sn[i] = arm_sin_f32(tmp);
@@ -218,8 +209,8 @@ static float compute_obj(float omega, const float x[SAMPLE_SIZE], int order,
     tmp += omega;
   }
   if (order > 1) {
-    float cnm1[SAMPLE_SIZE], snm1[SAMPLE_SIZE], cnm2[SAMPLE_SIZE],
-        snm2[SAMPLE_SIZE];
+    float t1[SAMPLE_SIZE], t2[SAMPLE_SIZE];
+    float *cnm2 = t1, *snm2 = t2;
     for (int i = 0; i < SAMPLE_SIZE; ++i) {
       cnm2[i] = 2 * cn[i] * cn[i] - 1;
       snm2[i] = 2 * cn[i] * sn[i];
@@ -227,6 +218,8 @@ static float compute_obj(float omega, const float x[SAMPLE_SIZE], int order,
       bs[1] += snm2[i] * x[i];
     }
     if (order > 2) {
+      float t3[SAMPLE_SIZE], t4[SAMPLE_SIZE];
+      float *cnm1 = t3, *snm1 = t4;
       arm_copy_f32(cnm2, cnm1, SAMPLE_SIZE);
       arm_copy_f32(snm2, snm1, SAMPLE_SIZE);
       arm_copy_f32(cn, cnm2, SAMPLE_SIZE);
@@ -247,14 +240,12 @@ static float compute_obj(float omega, const float x[SAMPLE_SIZE], int order,
       }
     }
   }
-  float gamma[(order + 1) * order / 2];
+  float c, s, gamma[(order + 1) * order / 2], h[2 * (order - 1)];
   th(order - 1, t, t + 2, gamma);
   solve(order, t, t + 2, bc, gamma, ac);
-  float h[2 * (order - 1)];
   arm_negate_f32(t + 2, h, 2 * (order - 1));
   thp(order - 1, t, h, gamma);
   solve(order, t, h, bs, gamma, as);
-  float c, s;
   arm_dot_prod_f32(bc, ac, order, &c);
   arm_dot_prod_f32(bs, as, order, &s);
   return c + s;
@@ -265,10 +256,9 @@ static int model_order_selection(const float omega_0h[MAX_MODEL_ORDER],
                                  const float x[SAMPLE_SIZE]) {
   const int r = 2, rho = 1, v = 1;
   const float delta = r * 1.5, u = ((float)SAMPLE_SIZE) / r;
-  float energy;
+  float energy, lnBF[MAX_MODEL_ORDER + 1];
   arm_power_f32(x, SAMPLE_SIZE, &energy);
   uint32_t order = 0;
-  float lnBF[MAX_MODEL_ORDER + 1];
   lnBF[0] = 0;
   for (int k = 1; k <= MAX_MODEL_ORDER; ++k) {
     const float lnW = logf(MIN((0.5 / k), PITCH_MAX) - PITCH_MIN);
@@ -287,16 +277,18 @@ static int model_order_selection(const float omega_0h[MAX_MODEL_ORDER],
       const float t = 1 + gh * (1 - R2), t2 = 1 + gh;
       const float lngamma =
           -logf(gh * u * (1 - R2) / (t * t)) - gh * w / (t2 * t2);
-      const float sigma2 = energy / nData - eS * Jomega / nData;
+      const float sigma2 = energy / SAMPLE_SIZE - eS * Jomega / SAMPLE_SIZE;
       float ms = 0;
       for (int ell = 1; ell <= k; ++ell)
         ms += ac[ell - 1] * ac[ell - 1] * ell * ell +
               as[ell - 1] * as[ell - 1] * ell * ell;
-      const float lnH = logf(fabs(-gh * nData * (nData * nData - 1) /
-                                  (r * r * 6 * (1 + gh) * sigma2))) +
-                        logf(ms);
-      const float lnBFg = logf(1 + gh) * -k + logf((energy / nData) / sigma2) *
-                                                  (((float)nData) / r);
+      const float lnH =
+          logf(fabs(-gh * SAMPLE_SIZE * (SAMPLE_SIZE * SAMPLE_SIZE - 1) /
+                    (r * r * 6 * (1 + gh) * sigma2))) +
+          logf(ms);
+      const float lnBFg =
+          logf(1 + gh) * -k +
+          logf((energy / SAMPLE_SIZE) / sigma2) * (((float)SAMPLE_SIZE) / r);
       lnBF[k] = lnBFg + logf(gh * (delta - r)) - logf(r) -
                 logf(1 + gh) * (delta / r) - lnW +
                 logf(2 * M_PI) * ((rho + 1) * 0.5) + lngamma / 2 - lnH / 2;
@@ -306,8 +298,7 @@ static int model_order_selection(const float omega_0h[MAX_MODEL_ORDER],
     }
   }
   if (!order) {
-    float max;
-    arm_max_f32(lnBF, maxModelOrder + 1, &max, &order);
+    arm_max_f32(lnBF, MAX_MODEL_ORDER + 1, &energy, &order);
   }
   return order;
 }
@@ -323,8 +314,7 @@ float fastf0nls(const float x[SAMPLE_SIZE]) {
   float omega_l = omega - res, omega_u = omega + res;
   const float K = 1.618033988749895;
   float Ik = (omega_u - omega_l) / K;
-  float omega_a = omega_u - Ik, omega_b = omega_l + Ik;
-  float ac[order], as[order];
+  float omega_a = omega_u - Ik, omega_b = omega_l + Ik, ac[order], as[order];
   float fa = -compute_obj(omega_a, x, order, ac, as);
   float fb = -compute_obj(omega_b, x, order, ac, as);
   while (Ik > 1e-3 || omega_u < omega_l) {

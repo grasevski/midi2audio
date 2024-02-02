@@ -2,7 +2,7 @@
 use arrayvec::ArrayVec;
 use clap::Parser;
 use core::convert::TryFrom;
-use synth::Note;
+use synth::{Note, SAMPLE_RATE};
 
 /// The number of distinct pitches that can be recognized.
 const NUM_NOTES: usize = 0x800 << Note::LOG_FREQUENCY_DIVISOR;
@@ -13,9 +13,9 @@ const NUM_WAVELENGTHS: usize = 0x100 << Note::LOG_NUM_BENDS;
 /// Maps a given frequency to its pitch.
 #[allow(clippy::cast_possible_truncation)]
 fn lookup(frequency: usize) -> i8 {
-    (f64::try_from(Note::OCTAVE).unwrap()
-        * (f64::try_from(i16::try_from(frequency).unwrap()).unwrap()
-            / (Note::BASE_FREQUENCY * f64::try_from(1 << Note::LOG_FREQUENCY_DIVISOR).unwrap()))
+    (f64::from(Note::OCTAVE)
+        * (f64::from(i16::try_from(frequency).unwrap())
+            / (Note::BASE_FREQUENCY * f64::from(1 << Note::LOG_FREQUENCY_DIVISOR)))
         .log2())
     .round() as i8
 }
@@ -25,9 +25,8 @@ fn lookup(frequency: usize) -> i8 {
 fn lookup_wavelength(pitch: usize) -> i16 {
     let p = i16::try_from(pitch).unwrap()
         - (i16::from(u8::from(Note::BASE_NOTE)) << Note::LOG_NUM_BENDS);
-    (f64::try_from(u32::from(Note::SAMPLE_RATE) << Note::WAVELENGTH_BITS).unwrap()
-        / (Note::BASE_FREQUENCY
-            * (f64::try_from(p).unwrap() / f64::try_from(Note::OCTAVE).unwrap()).exp2()))
+    (f64::from(u32::from(SAMPLE_RATE) << Note::WAVELENGTH_BITS)
+        / (Note::BASE_FREQUENCY * (f64::from(p) / f64::from(Note::OCTAVE)).exp2()))
     .round() as i16
 }
 
@@ -51,13 +50,13 @@ struct GammaVars {
 
 impl GammaVars {
     /// Maximum number of harmonics.
-    const MAX_MODEL_ORDER: usize = 14;
+    const MAX_MODEL_ORDER: usize = 16;
 
     /// Number of audio samples.
-    const SAMPLE_SIZE: usize = 128;
+    const SAMPLE_SIZE: usize = 64;
 
     /// Number of points in the FFT.
-    const N_FFT_GRID: usize = 5 * Self::SAMPLE_SIZE * Self::MAX_MODEL_ORDER;
+    const N_FFT_GRID: usize = 2 * Self::SAMPLE_SIZE * Self::MAX_MODEL_ORDER;
 
     /// Number of model parameters.
     const MP: usize = Self::N_FFT_GRID / 2 + 1;
@@ -65,12 +64,17 @@ impl GammaVars {
     /// Generates fastf0nls C lookup tables.
     #[allow(clippy::cast_possible_truncation)]
     fn fastf0nls() {
+        static_assertions::const_assert!(GammaVars::N_FFT_GRID == 2048);
         println!("#pragma once");
         println!("#include <stdint.h>");
-        const PITCH_MIN: f32 = 1.0 / 64.0;
+        const PITCH_MIN: f32 = 1.0 / (GammaVars::SAMPLE_SIZE as f32);
         println!("#define PITCH_MIN {}", PITCH_MIN);
         const PITCH_MAX: f32 = 1.0;
         println!("#define PITCH_MAX {}", PITCH_MAX);
+        println!(
+            "#define FFT_INIT arm_rfft_fast_init_{}_f32",
+            Self::N_FFT_GRID
+        );
         println!("enum {{ MAX_MODEL_ORDER = {} }};", Self::MAX_MODEL_ORDER);
         println!("enum {{ N_FFT_GRID = {} }};", Self::N_FFT_GRID);
         println!("enum {{ MP = {} }};", Self::MP);
@@ -81,20 +85,19 @@ impl GammaVars {
             min_fft_index, max_fft_index
         );
         println!();
-        let mut fft_shift_vector = [(0, 0); Self::MP];
-        const F: f32 = 128.0;
+        let mut fft_shift_vector = [(0.0, 0.0); Self::MP];
         for (i, x) in fft_shift_vector.iter_mut().enumerate() {
             const A: f32 = core::f32::consts::PI * (GammaVars::SAMPLE_SIZE as f32 - 1.0)
                 / GammaVars::N_FFT_GRID as f32;
             let v = A * i as f32;
-            *x = ((v.cos() * F).round() as i8, (v.sin() * F).round() as i8);
+            *x = (v.cos(), v.sin());
         }
         let fft_shift_vector: Vec<_> = fft_shift_vector
             .iter()
             .map(|(a, b)| format!("{}, {}", a, b))
             .collect();
         println!(
-            "const int8_t FFT_SHIFT_VECTOR[2*MP] = {{\n  {}\n}};",
+            "const float FFT_SHIFT_VECTOR[MP << 1] = {{\n  {},\n}};",
             fft_shift_vector.join(", ")
         );
         println!();
@@ -153,31 +156,26 @@ impl GammaVars {
                 &cc_vectors[..],
             );
         }
-        const F2: f32 = 256.0;
-        let gamma1: Vec<_> = gamma1.iter().map(|x| ((x * F * F2).round() as i16).to_string()).collect();
-        println!(
-            "const int16_t GAMMA1[MAX_MODEL_ORDER*MP] = {{\n  {}\n}};",
-            gamma1.join(", ")
-        );
+        println!("const float GAMMA1[MAX_MODEL_ORDER * MP] = {{");
+        for x in gamma1.chunks(Self::MP) {
+            let x: Vec<_> = x.iter().map(|x| x.to_string()).collect();
+            println!("  {},", x.join(", "));
+        }
+        println!("}};");
         println!();
-        let gamma2: Vec<_> = gamma2.iter().map(|x| ((x * F * F2).round() as i16).to_string()).collect();
-        println!(
-            "const int16_t GAMMA2[MAX_MODEL_ORDER*MP] = {{\n  {}\n}};",
-            gamma2.join(", ")
-        );
+        println!("const float GAMMA2[MAX_MODEL_ORDER * MP] = {{");
+        for x in gamma2.chunks(Self::MP) {
+            let x: Vec<_> = x.iter().map(|x| x.to_string()).collect();
+            println!("  {},", x.join(", "));
+        }
+        println!("}};");
         println!();
-        println!("{}\n", cc_vectors.iter().map(|x| x.len()).sum::<usize>());
-        let cc_vectors: Vec<_> = cc_vectors
-            .iter()
-            .map(|x| {
-                let x: Vec<_> = x.iter().map(|f| ((f * 64.0 * F2).round() as i16).to_string()).collect();
-                format!("  {{{}}},", x.join(", "))
-            })
-            .collect();
-        println!(
-            "const int16_t CC_VECTORS[2*(MAX_MODEL_ORDER+1)][] = {{\n{}\n}};",
-            cc_vectors.join("\n")
-        );
+        println!("const float *CC_VECTORS[(MAX_MODEL_ORDER + 1) << 1] = {{");
+        for x in cc_vectors {
+            let x: Vec<_> = x.iter().map(|f| f.to_string()).collect();
+            println!("  (const float[]){{{}}},", x.join(", "));
+        }
+        println!("}};");
     }
 
     /// Does an in place update to gamma for the given order.
