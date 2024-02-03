@@ -24,8 +24,9 @@ fn panic() -> ! {
 mod app {
     use super::{Audio, Midi};
     use stm32l4xx_hal::{
-        pac::{DMA1, Peripherals},
+        pac::{Peripherals, DMA1},
         prelude::*,
+        rcc::Enable as _,
         serial::{Config, Serial},
     };
     use synth::{Synth, MIDI_CAP};
@@ -75,8 +76,14 @@ mod app {
                     .into_alternate(&mut gpioa.moder, &mut gpioa.otyper, &mut gpioa.afrh);
             let config = Config::default().baudrate(31250.bps());
             Serial::usart1(pac.USART1, (tx, rx), config, clocks, &mut rcc.apb2);
-            let (midi, synth) = (Midi::new(&dma), Synth::default());
-            Self { dma, audio, midi, synth }
+            let midi = Midi::new(&dma);
+            DMA1::enable(&mut rcc.ahb1);
+            Self {
+                dma,
+                audio,
+                midi,
+                synth: Default::default(),
+            }
         }
     }
 
@@ -88,8 +95,13 @@ mod app {
 
     /// Processes the next ADC reading.
     #[task(binds = DMA1_CH1, local = [dma, audio, midi, synth])]
-    fn dma1_channel1(cx: dma1_channel1::Context) {
-        let dma1_channel1::LocalResources { dma, audio, midi, synth } = cx.local;
+    fn dma1_ch1(cx: dma1_ch1::Context) {
+        let dma1_ch1::LocalResources {
+            dma,
+            audio,
+            midi,
+            synth,
+        } = cx.local;
         let (mut midi_in, mut midi_out) = ([0; MIDI_CAP], synth::Midi::new_const());
         let n = midi.read(dma, &mut midi_in[..]);
         let ((audio_in, audio_out), mut k) = (audio.get(dma), n);
@@ -137,11 +149,13 @@ impl Audio {
         static mut RX: [u16; N as usize] = [0; N as usize];
         static mut TX: [u8; N as usize] = [0; N as usize];
         let (opamp, adc_common, adc) = input;
+
         DAC1::enable(&mut rcc.apb1r1);
         dac.shhr.write(|w| unsafe { w.thold1().bits(0x1ff) });
         dac.mcr.write(|w| unsafe { w.mode1().bits(0b100) });
         dac.cr
             .write(|w| w.en1().set_bit().dmaen1().set_bit().ten1().set_bit());
+
         OPAMP::enable(&mut rcc.apb1r1);
         opamp.opamp1_csr.write(|w| {
             unsafe {
@@ -151,6 +165,7 @@ impl Audio {
             }
             w.opa_range().set_bit().opalpm().set_bit().opaen().set_bit()
         });
+
         let mut delay = DelayCM::new(clocks);
         adc_common.ccr.write(|w| unsafe { w.presc().bits(0b1011) });
         adc.cfgr.write(|w| {
@@ -161,27 +176,27 @@ impl Audio {
         adc.set_resolution(Resolution::Bits8);
         adc.configure_sequence(&mut pa3, Sequence::One, SampleTime::Cycles47_5);
 
-        dma.ccr1.write(|w| {
-            w.circ().set_bit().en().set_bit().minc().set_bit();
-            w.msize().bits16().psize().bits16().htie().set_bit().tcie().set_bit()
-        });
-        dma.cndtr1.write(|w| w.ndt().bits(N));
         dma.cpar1
             .write(|w| unsafe { w.bits(&(*ADC1::ptr()).dr as *const _ as u32) });
         dma.cmar1
             .write(|w| unsafe { w.bits(&RX as *const _ as u32) });
-
-        dma.ccr3.write(|w| {
+        dma.cndtr1.write(|w| w.ndt().bits(N));
+        dma.ccr1.write(|w| {
             w.circ().set_bit().en().set_bit().minc().set_bit();
-            w.msize().bits8().psize().bits8().dir().set_bit()
+            w.msize().bits16().psize().bits16();
+            w.htie().set_bit().tcie().set_bit()
         });
-        dma.cndtr3.write(|w| w.ndt().bits(N));
+
         dma.cpar3
             .write(|w| unsafe { w.bits(&(*DAC1::ptr()).dhr8r1 as *const _ as u32) });
         dma.cmar3
             .write(|w| unsafe { w.bits(&TX as *const _ as u32) });
-
+        dma.cndtr3.write(|w| w.ndt().bits(N));
         dma.cselr.write(|w| w.c3s().map6());
+        dma.ccr3.write(|w| {
+            w.circ().set_bit().en().set_bit().minc().set_bit();
+            w.msize().bits8().psize().bits8().dir().set_bit()
+        });
 
         Timer::free_running_tim6(
             tim,
@@ -190,6 +205,7 @@ impl Audio {
             true,
             &mut rcc.apb1r1,
         );
+
         let (k, (rx, tx)) = (false, unsafe { (&RX, &mut TX) });
         Self { k, rx, tx }
     }
@@ -198,7 +214,11 @@ impl Audio {
     fn get(&mut self, dma: &DMA1) -> (&[u16], &mut [u8]) {
         dma.ifcr.write(|w| w.cgif1().set_bit());
         let ix = WINDOW.into();
-        let r = if self.k { 0..ix } else { ix..(WINDOW << 1).into() };
+        let r = if self.k {
+            0..ix
+        } else {
+            ix..(WINDOW << 1).into()
+        };
         self.k = !self.k;
         (&self.rx[r.clone()], &mut self.tx[r])
     }
@@ -222,25 +242,27 @@ impl Midi {
         static mut RX: [u8; MIDI_CAP] = [0; MIDI_CAP];
         static mut TX: [u8; MIDI_CAP] = [0; MIDI_CAP];
 
-        dma.ccr5.write(|w| {
-            w.circ().set_bit().en().set_bit().minc().set_bit();
-            w.msize().bits8().psize().bits8()
-        });
-        dma.cndtr5.write(|w| w.ndt().bits(MIDI_CAP.try_into().unwrap()));
         dma.cpar5
             .write(|w| unsafe { w.bits(&(*USART1::ptr()).rdr as *const _ as u32) });
         dma.cmar5
             .write(|w| unsafe { w.bits(&RX as *const _ as u32) });
+        dma.cndtr5
+            .write(|w| w.ndt().bits(MIDI_CAP.try_into().unwrap()));
         dma.cselr.write(|w| w.c5s().map2());
-
-        dma.ccr4.write(|w| {
-            w.minc().set_bit().msize().bits8().psize().bits8().dir().set_bit()
+        dma.ccr5.write(|w| {
+            w.circ().set_bit().en().set_bit().minc().set_bit();
+            w.msize().bits8().psize().bits8()
         });
+
         dma.cpar4
             .write(|w| unsafe { w.bits(&(*USART1::ptr()).tdr as *const _ as u32) });
         dma.cmar4
             .write(|w| unsafe { w.bits(&TX as *const _ as u32) });
         dma.cselr.write(|w| w.c4s().map2());
+        dma.ccr4.write(|w| {
+            w.en().set_bit().minc().set_bit();
+            w.msize().bits8().psize().bits8().dir().set_bit()
+        });
 
         let (k, (rx, tx)) = (0, unsafe { (&RX, &mut TX) });
         Self { k, rx, tx }
@@ -254,14 +276,14 @@ impl Midi {
                 let o = k - self.k;
                 midi_in[..o].clone_from_slice(&self.rx[k..self.k]);
                 o
-            },
+            }
             Ordering::Greater => {
                 let o = self.rx.len() - self.k;
                 midi_in[..o].clone_from_slice(&self.rx[self.k..]);
                 let ret = o + k;
                 midi_in[o..ret].clone_from_slice(&self.rx[..k]);
                 ret
-            },
+            }
             Ordering::Equal => 0,
         };
         self.k = k;
@@ -270,7 +292,10 @@ impl Midi {
 
     /// Writes the midi bytes to DMA.
     fn write_slice(&mut self, dma: &DMA1, midi_out: &[u8]) {
+        dma.ccr4.write(|w| w.en().clear_bit());
         self.tx[..midi_out.len()].clone_from_slice(midi_out);
-        dma.cndtr4.write(|w| w.ndt().bits(midi_out.len().try_into().unwrap()));
+        dma.cndtr4
+            .write(|w| w.ndt().bits(midi_out.len().try_into().unwrap()));
+        dma.ccr4.write(|w| w.en().set_bit());
     }
 }

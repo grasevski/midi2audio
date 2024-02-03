@@ -14,10 +14,16 @@ use micromath::F32Ext as _;
 mod lookup;
 
 /// Midi bytes are buffered while DSP is happening.
-pub type Midi = ArrayVec<u8, MIDI_CAP>;
+pub type Midi = ArrayVec<u8, MIDI_TX_CAP>;
 
-/// Number of bytes that can be buffered.
-pub const MIDI_CAP: usize = MidiController::MIDI_MAX_MESSAGES * Synth::MIDI_MESSAGE_LEN;
+/// Max number of bytes that can be sent.
+const MIDI_TX_CAP: usize = MidiController::MIDI_MAX_MESSAGES * Synth::MIDI_MESSAGE_LEN;
+
+/// Max number of bytes that can be transferred.
+pub const MIDI_CAP: usize = BYTE_RATE * (WINDOW as usize) / (SAMPLE_RATE as usize) + 1;
+
+/// Max number of midi bytes per second.
+const BYTE_RATE: usize = 3125;
 
 /// ADC midpoint reading.
 const MIDPOINT: u8 = 0x80;
@@ -85,7 +91,7 @@ impl Synth {
 
     /// Converts midi messages to bytes.
     fn serialize_midi(msgs: &[MidiMessage]) -> Midi {
-        let (mut midi_out, mut n) = (Midi::from([0; MIDI_CAP]), 0);
+        let (mut midi_out, mut n) = (Midi::from([0; MIDI_TX_CAP]), 0);
         for x in msgs {
             n += x.copy_to_slice(&mut midi_out[n..]).unwrap();
         }
@@ -460,9 +466,9 @@ impl AmplitudeTracker {
     /// Takes the mean of the absolute values of the audio wave.
     fn calculate(&mut self) -> Velocity {
         const MAX_LOG_WINDOW: u8 = 9;
-        static_assertions::const_assert!(
-            (WINDOW as f32) * 3125.0 / (SAMPLE_RATE as f32) > (MIDI_CAP as f32)
-        );
+        const _BYTES_PER_WINDOW: f32 = (WINDOW as f32) * (BYTE_RATE as f32) / (SAMPLE_RATE as f32);
+        static_assertions::const_assert!(_BYTES_PER_WINDOW > MIDI_TX_CAP as f32);
+        static_assertions::const_assert!(_BYTES_PER_WINDOW < MIDI_CAP as f32);
         static_assertions::const_assert!(LOG_WINDOW <= MAX_LOG_WINDOW);
         let v = if LOG_WINDOW == MAX_LOG_WINDOW {
             self.0 >> 1
@@ -558,7 +564,7 @@ impl Note {
 
 #[cfg(test)]
 mod tests {
-    use super::{lookup, Note, Synth, LOG_WINDOW, MIDI_CAP, MIDPOINT, WINDOW};
+    use super::{lookup, Note, Synth, LOG_WINDOW, MIDI_TX_CAP, MIDPOINT, WINDOW};
     use core::convert::TryFrom;
     use proptest::prelude::*;
     use wmidi::{Channel, MidiMessage, PitchBend, ProgramNumber, Velocity};
