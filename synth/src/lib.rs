@@ -412,12 +412,10 @@ impl MidiController {
         if self.t < WINDOW {
             return ret;
         }
-        let a = self.amplitude.calculate();
-        let f = if a == Default::default() {
-            None
-        } else {
-            self.frequency.calculate()
-        };
+        let (a, mut f) = (self.amplitude.calculate(), self.frequency.calculate());
+        if a == Default::default() {
+            f = None;
+        }
         if let Some(f) = f {
             let note_on = MidiMessage::NoteOn(Channel::Ch1, f.note, a);
             let pitch_bend_change = MidiMessage::PitchBendChange(Channel::Ch1, f.pitch_bend);

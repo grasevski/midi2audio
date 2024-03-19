@@ -4,32 +4,18 @@
 use core::cmp::Ordering;
 use defmt_rtt as _;
 use panic_probe as _;
-use stm32l4xx_hal::{
-    adc::{Resolution, SampleTime, Sequence, ADC},
-    delay::DelayCM,
-    gpio::{Analog, PA3},
-    pac::{ADC1, ADC_COMMON, DAC1, DMA1, OPAMP, TIM6, USART1},
-    prelude::*,
-    rcc::{Clocks, Enable as _, Rcc},
-    timer::Timer,
-};
-use synth::{MIDI_CAP, SAMPLE_RATE, WINDOW};
+use stm32l4::stm32l4x2::{ADC1, ADC_COMMON, DAC, DMA1, OPAMP, TIM6, USART1};
+use synth::WINDOW;
 
 #[defmt::panic_handler]
 fn panic() -> ! {
     cortex_m::asm::udf()
 }
 
-#[rtic::app(device = stm32l4xx_hal::pac)]
+#[rtic::app(device = stm32l4::stm32l4x2)]
 mod app {
-    use super::{Audio, Midi};
-    use stm32l4xx_hal::{
-        pac::{Peripherals, DMA1},
-        prelude::*,
-        rcc::Enable as _,
-        serial::{Config, Serial},
-    };
-    use synth::{Synth, MIDI_CAP};
+    use super::{wait, Audio, Midi};
+    use synth::{Synth, MIDI_CAP, WINDOW};
 
     /// Shared resources.
     #[shared]
@@ -38,9 +24,6 @@ mod app {
     /// Uniquely owned resources.
     #[local]
     struct Local {
-        /// Memory buffers used by audio and MIDI.
-        dma: DMA1,
-
         /// Audio IO.
         audio: Audio,
 
@@ -51,67 +34,134 @@ mod app {
         synth: Synth,
     }
 
-    impl From<Peripherals> for Local {
-        fn from(pac: Peripherals) -> Self {
-            pac.VREFBUF.csr.write(|w| w.envr().set_bit());
-            let (mut rcc, mut flash) = (pac.RCC.constrain(), pac.FLASH.constrain());
-            let mut pwr = pac.PWR.constrain(&mut rcc.apb1r1);
-            let clocks = rcc.cfgr.freeze(&mut flash.acr, &mut pwr);
-            let (mut gpioa, dma) = (pac.GPIOA.split(&mut rcc.ahb2), pac.DMA1);
-            let audio = Audio::new(
-                gpioa.pa3,
-                clocks,
-                &mut rcc,
-                &dma,
-                pac.TIM6,
-                (pac.OPAMP, pac.ADC_COMMON, pac.ADC1),
-                pac.DAC1,
-            );
-            let tx = gpioa
-                .pa9
-                .into_alternate(&mut gpioa.moder, &mut gpioa.otyper, &mut gpioa.afrh);
-            let rx =
-                gpioa
-                    .pa10
-                    .into_alternate(&mut gpioa.moder, &mut gpioa.otyper, &mut gpioa.afrh);
-            let config = Config::default().baudrate(31250.bps());
-            Serial::usart1(pac.USART1, (tx, rx), config, clocks, &mut rcc.apb2);
-            let midi = Midi::new(&dma);
-            DMA1::enable(&mut rcc.ahb1);
-            Self {
-                dma,
-                audio,
-                midi,
-                synth: Default::default(),
-            }
-        }
-    }
-
     /// Configures the peripherals.
     #[init]
     fn init(cx: init::Context) -> (Shared, Local, init::Monotonics) {
-        (Shared {}, cx.device.into(), init::Monotonics())
+        const RCC_WAIT: u32 = 2;
+        const N: u8 = WINDOW << 1;
+        static mut INPUT: [u8; N as usize] = [0; N as usize];
+        static mut OUTPUT: [u8; N as usize] = [0; N as usize];
+        static mut RX: [u8; MIDI_CAP] = [0; MIDI_CAP];
+        static mut TX: [u8; MIDI_CAP] = [0; MIDI_CAP];
+        let pac = cx.device;
+        let flash = pac.FLASH;
+        flash.acr.modify(|_, w| w.prften().set_bit());
+        let rcc = pac.RCC;
+        rcc.apb2enr.modify(|_, w| w.syscfgen().set_bit());
+        wait(RCC_WAIT);
+        rcc.apb1enr1.modify(|_, w| w.pwren().set_bit());
+        wait(RCC_WAIT);
+        let pwr = pac.PWR;
+        pwr.cr1.modify(|_, w| w.dbp().set_bit());
+        while pwr.cr1.read().dbp().bit_is_clear() {}
+        rcc.bdcr.modify(|_, w| w.lseon().set_bit());
+        while rcc.bdcr.read().lserdy().bit_is_clear() {}
+        rcc.apb1enr1.modify(|_, w| w.pwren().clear_bit());
+        rcc.cr.modify(|_, w| w.pllon().clear_bit());
+        while rcc.cr.read().pllrdy().bit_is_set() {}
+        rcc.pllcfgr
+            .modify(|_, w| unsafe { w.pllsrc().bits(1).plln().bits(40) });
+        rcc.cr.modify(|_, w| w.pllon().set_bit());
+        rcc.pllcfgr.modify(|_, w| w.pllren().set_bit());
+        while rcc.cr.read().pllrdy().bit_is_clear() {}
+        flash.acr.modify(|_, w| unsafe { w.latency().bits(4) });
+        rcc.cfgr
+            .modify(|_, w| unsafe { w.sw().bits(3).ppre2().bits(7) });
+        while rcc.cfgr.read().sws().bits() != 3 {}
+        rcc.cr.modify(|_, w| w.msipllen().set_bit());
+        rcc.ccipr.modify(|_, w| w.adcsel().bits(3));
+
+        rcc.apb1enr1
+            .modify(|_, w| w.opampen().set_bit().dac1en().set_bit().tim6en().set_bit());
+        wait(RCC_WAIT);
+        rcc.apb2enr.modify(|_, w| w.usart1en().set_bit());
+        wait(RCC_WAIT);
+        rcc.ahb1enr.modify(|_, w| w.dma1en().set_bit());
+        wait(RCC_WAIT);
+        rcc.ahb2enr.modify(|_, w| {
+            w.gpioaen().set_bit().gpioben().set_bit();
+            w.gpiocen().set_bit().gpiohen().set_bit();
+            w.adcen().set_bit()
+        });
+        wait(RCC_WAIT);
+
+        let gpioa = pac.GPIOA;
+        gpioa.afrh.modify(|_, w| w.afrh9().bits(7).afrh10().bits(7));
+        gpioa
+            .moder
+            .modify(|_, w| w.moder9().bits(2).moder10().bits(2));
+
+        let (adc1, dac, usart1, dma1) = (pac.ADC1, pac.DAC, pac.USART1, pac.DMA1);
+
+        dma1.cselr
+            .modify(|_, w| w.c3s().bits(6).c4s().bits(2).c5s().bits(2));
+
+        dma1.cndtr1.modify(|_, w| w.ndt().bits(N.into()));
+        dma1.cpar1
+            .modify(|_, w| unsafe { w.pa().bits(adc1.dr.as_ptr() as u32) });
+        dma1.cmar1
+            .modify(|_, w| unsafe { w.ma().bits(&INPUT as *const _ as u32) });
+        dma1.ccr1.modify(|_, w| {
+            unsafe { w.psize().bits(1) };
+            w.minc().set_bit().circ().set_bit();
+            w.htie().set_bit().tcie().set_bit()
+        });
+        dma1.ccr1.modify(|_, w| w.en().set_bit());
+
+        dma1.cndtr3.modify(|_, w| w.ndt().bits(N.into()));
+        dma1.cpar3
+            .modify(|_, w| unsafe { w.pa().bits(dac.dhr8r1.as_ptr() as u32) });
+        dma1.cmar3
+            .modify(|_, w| unsafe { w.ma().bits(&OUTPUT as *const _ as u32) });
+        dma1.ccr3.modify(|_, w| {
+            unsafe { w.psize().bits(1) };
+            w.minc().set_bit().circ().set_bit().dir().set_bit()
+        });
+        dma1.ccr3.modify(|_, w| w.en().set_bit());
+
+        dma1.cpar4
+            .modify(|_, w| unsafe { w.pa().bits(usart1.tdr.as_ptr() as u32) });
+        dma1.cmar4
+            .modify(|_, w| unsafe { w.ma().bits(&TX as *const _ as u32) });
+        dma1.ccr4.modify(|_, w| w.minc().set_bit().dir().set_bit());
+
+        dma1.cndtr5.modify(|_, w| w.ndt().bits(MIDI_CAP as u16));
+        dma1.cpar5
+            .modify(|_, w| unsafe { w.pa().bits(usart1.rdr.as_ptr() as u32) });
+        dma1.cmar5
+            .modify(|_, w| unsafe { w.ma().bits(&RX as *const _ as u32) });
+        dma1.ccr5.modify(|_, w| w.minc().set_bit().circ().set_bit());
+        dma1.ccr5.modify(|_, w| w.en().set_bit());
+
+        let audio = unsafe {
+            Audio::new(
+                &INPUT,
+                &mut OUTPUT,
+                pac.OPAMP,
+                (adc1, pac.ADC_COMMON),
+                dac,
+                pac.TIM6,
+            )
+        };
+        let midi = unsafe { Midi::new(&RX, &mut TX, dma1, usart1) };
+        let synth = Default::default();
+        (Shared {}, Local { audio, midi, synth }, init::Monotonics())
     }
 
     /// Processes the next ADC reading.
-    #[task(binds = DMA1_CH1, local = [dma, audio, midi, synth])]
+    #[task(binds = DMA1_CH1, local = [audio, midi, synth])]
     fn dma1_ch1(cx: dma1_ch1::Context) {
-        let dma1_ch1::LocalResources {
-            dma,
-            audio,
-            midi,
-            synth,
-        } = cx.local;
+        let dma1_ch1::LocalResources { audio, midi, synth } = cx.local;
         let (mut midi_in, mut midi_out) = ([0; MIDI_CAP], synth::Midi::new_const());
-        let n = midi.read(dma, &mut midi_in[..]);
-        let ((audio_in, audio_out), mut k) = (audio.get(dma), n);
+        let n = midi.read(&mut midi_in[..]);
+        let ((audio_in, audio_out), mut k) = (audio.get(), n);
         for (x, y) in audio_in.iter().cloned().zip(audio_out.iter_mut()) {
-            let (o, mo) = synth.step(x.try_into().unwrap(), &midi_in[..k]);
+            let (o, mo) = synth.step(x, &midi_in[..k]);
             *y = o;
             midi_out.try_extend_from_slice(&mo[..]).unwrap();
             k = 0;
         }
-        midi.write_slice(dma, &midi_out[..]);
+        midi.write_slice(&midi_out[..]);
         defmt::println!(
             "mi={} mo={} i={} o={}",
             &midi_in[..n],
@@ -122,13 +172,20 @@ mod app {
     }
 }
 
+/// Busy loops for the given amount of cpu cycles.
+fn wait(t: u32) {
+    for _ in 0..t {
+        core::hint::black_box(());
+    }
+}
+
 /// Audio IO peripherals.
 pub struct Audio {
     /// Buffer position.
     k: bool,
 
     /// ADC buffer.
-    rx: &'static [u16],
+    rx: &'static [u8],
 
     /// DAC buffer.
     tx: &'static mut [u8],
@@ -137,82 +194,111 @@ pub struct Audio {
 impl Audio {
     /// Initializes the audio peripherals.
     fn new(
-        mut pa3: PA3<Analog>,
-        clocks: Clocks,
-        rcc: &mut Rcc,
-        dma: &DMA1,
-        tim: TIM6,
-        input: (OPAMP, ADC_COMMON, ADC1),
-        dac: DAC1,
+        rx: &'static [u8],
+        tx: &'static mut [u8],
+        opamp: OPAMP,
+        adc: (ADC1, ADC_COMMON),
+        dac: DAC,
+        tim6: TIM6,
     ) -> Self {
-        const N: u16 = (WINDOW << 1) as u16;
-        static mut RX: [u16; N as usize] = [0; N as usize];
-        static mut TX: [u8; N as usize] = [0; N as usize];
-        let (opamp, adc_common, adc) = input;
+        const MILLISECOND: u32 = 80000;
 
-        DAC1::enable(&mut rcc.apb1r1);
-        dac.shhr.write(|w| unsafe { w.thold1().bits(0x1ff) });
-        dac.mcr.write(|w| unsafe { w.mode1().bits(0b100) });
-        dac.cr
-            .write(|w| w.en1().set_bit().dmaen1().set_bit().ten1().set_bit());
-
-        OPAMP::enable(&mut rcc.apb1r1);
-        opamp.opamp1_csr.write(|w| {
-            unsafe {
-                w.pga_gain().bits(0b10);
-                w.vm_sel().bits(0b10);
-                w.opamode().bits(0b10);
+        opamp.opamp1_csr.modify(|_, w| {
+            unsafe { w.pga_gain().bits(3).vm_sel().bits(2) };
+            w.usertrim().set_bit().opalpm().set_bit()
+        });
+        opamp
+            .opamp1_lpotr
+            .modify(|_, w| w.trimlpoffsetn().bits(31).trimlpoffsetp().bits(31));
+        opamp.opamp1_csr.modify(|_, w| w.calon().set_bit());
+        opamp.opamp1_csr.modify(|_, w| w.opaen().set_bit());
+        let (mut trim, mut delta) = (16, 8);
+        while delta != 0 {
+            opamp
+                .opamp1_lpotr
+                .modify(|_, w| w.trimlpoffsetn().bits(trim));
+            wait(MILLISECOND);
+            if opamp.opamp1_csr.read().calout().bit_is_set() {
+                trim -= delta;
+            } else {
+                trim += delta;
             }
-            w.opa_range().set_bit().opalpm().set_bit().opaen().set_bit()
+            delta >>= 1;
+        }
+        opamp
+            .opamp1_lpotr
+            .modify(|_, w| w.trimlpoffsetn().bits(trim));
+        wait(MILLISECOND);
+        if opamp.opamp1_csr.read().calout().bit_is_clear() {
+            trim += 1;
+            opamp
+                .opamp1_lpotr
+                .modify(|_, w| w.trimlpoffsetn().bits(trim));
+        }
+        opamp.opamp1_csr.modify(|_, w| w.calsel().set_bit());
+        trim = 16;
+        delta = 8;
+        while delta != 0 {
+            opamp
+                .opamp1_lpotr
+                .modify(|_, w| w.trimlpoffsetp().bits(trim));
+            wait(MILLISECOND);
+            if opamp.opamp1_csr.read().calout().bit_is_set() {
+                trim += delta;
+            } else {
+                trim -= delta;
+            }
+            delta >>= 1;
+        }
+        opamp
+            .opamp1_lpotr
+            .modify(|_, w| w.trimlpoffsetp().bits(trim));
+        wait(MILLISECOND);
+        if opamp.opamp1_csr.read().calout().bit_is_set() {
+            trim += 1;
+            opamp
+                .opamp1_lpotr
+                .modify(|_, w| w.trimlpoffsetp().bits(trim));
+        }
+        opamp.opamp1_csr.modify(|_, w| w.opaen().clear_bit());
+        opamp.opamp1_csr.modify(|_, w| w.calon().clear_bit());
+        opamp
+            .opamp1_csr
+            .modify(|_, w| unsafe { w.opamode().bits(2) });
+        opamp.opamp1_csr.modify(|_, w| w.opaen().set_bit());
+
+        let (adc1, adc_common) = adc;
+        adc1.cr.modify(|_, w| w.deeppwd().clear_bit());
+        adc1.cr.modify(|_, w| w.advregen().set_bit());
+        wait(2000);
+        adc1.cr.modify(|_, w| w.adcal().set_bit());
+        while adc1.cr.read().adcal().bit_is_set() {}
+        adc_common.ccr.modify(|_, w| unsafe { w.presc().bits(10) });
+        adc1.cfgr.modify(|_, w| {
+            unsafe { w.exten().bits(1).extsel().bits(13).res().bits(2) };
+            w.dmacfg().set_bit().dmaen().set_bit()
         });
+        adc1.smpr1.modify(|_, w| unsafe { w.smp1().bits(7) });
+        adc1.sqr1.modify(|_, w| unsafe { w.sq1().bits(8) });
+        adc1.cr.modify(|_, w| w.aden().set_bit());
+        while adc1.isr.read().adrdy().bit_is_clear() {}
+        adc1.cr.modify(|_, w| w.adstart().set_bit());
 
-        let mut delay = DelayCM::new(clocks);
-        adc_common.ccr.write(|w| unsafe { w.presc().bits(0b1011) });
-        adc.cfgr.write(|w| {
-            w.dmacfg().set_bit().dmaen().set_bit();
-            unsafe { w.exten().bits(0b01).extsel().bits(0b1101) }
-        });
-        let mut adc = ADC::new(adc, adc_common, &mut rcc.ahb2, &mut rcc.ccipr, &mut delay);
-        adc.set_resolution(Resolution::Bits8);
-        adc.configure_sequence(&mut pa3, Sequence::One, SampleTime::Cycles47_5);
+        dac.cr.modify(|_, w| w.ten1().set_bit());
+        dac.cr.modify(|_, w| w.dmaen1().set_bit());
+        dac.cr.modify(|_, w| w.en1().set_bit());
 
-        dma.cpar1
-            .write(|w| unsafe { w.bits(&(*ADC1::ptr()).dr as *const _ as u32) });
-        dma.cmar1
-            .write(|w| unsafe { w.bits(&RX as *const _ as u32) });
-        dma.cndtr1.write(|w| w.ndt().bits(N));
-        dma.ccr1.write(|w| {
-            w.circ().set_bit().en().set_bit().minc().set_bit();
-            w.msize().bits16().psize().bits16();
-            w.htie().set_bit().tcie().set_bit()
-        });
+        tim6.arr.modify(|_, w| w.arr().bits(1));
+        tim6.psc.modify(|_, w| w.psc().bits(15624));
+        tim6.egr.write(|w| w.ug().set_bit());
+        tim6.cr2.modify(|_, w| unsafe { w.mms().bits(2) });
+        tim6.cr1.modify(|_, w| w.cen().set_bit());
 
-        dma.cpar3
-            .write(|w| unsafe { w.bits(&(*DAC1::ptr()).dhr8r1 as *const _ as u32) });
-        dma.cmar3
-            .write(|w| unsafe { w.bits(&TX as *const _ as u32) });
-        dma.cndtr3.write(|w| w.ndt().bits(N));
-        dma.cselr.write(|w| w.c3s().map6());
-        dma.ccr3.write(|w| {
-            w.circ().set_bit().en().set_bit().minc().set_bit();
-            w.msize().bits8().psize().bits8().dir().set_bit()
-        });
-
-        Timer::free_running_tim6(
-            tim,
-            clocks,
-            u32::from(SAMPLE_RATE).Hz(),
-            true,
-            &mut rcc.apb1r1,
-        );
-
-        let (k, (rx, tx)) = (false, unsafe { (&RX, &mut TX) });
-        Self { k, rx, tx }
+        Self { k: false, rx, tx }
     }
 
     /// Gets audio IO buffers.
-    fn get(&mut self, dma: &DMA1) -> (&[u16], &mut [u8]) {
-        dma.ifcr.write(|w| w.cgif1().set_bit());
+    fn get(&mut self) -> (&[u8], &mut [u8]) {
         let ix = WINDOW.into();
         let r = if self.k {
             0..ix
@@ -234,43 +320,28 @@ pub struct Midi {
 
     /// Midi output buffer.
     tx: &'static mut [u8],
+
+    /// DMA peripheral registers.
+    dma1: DMA1,
 }
 
 impl Midi {
     /// Initializes the UART interfaces.
-    fn new(dma: &DMA1) -> Self {
-        static mut RX: [u8; MIDI_CAP] = [0; MIDI_CAP];
-        static mut TX: [u8; MIDI_CAP] = [0; MIDI_CAP];
-
-        dma.cpar5
-            .write(|w| unsafe { w.bits(&(*USART1::ptr()).rdr as *const _ as u32) });
-        dma.cmar5
-            .write(|w| unsafe { w.bits(&RX as *const _ as u32) });
-        dma.cndtr5
-            .write(|w| w.ndt().bits(MIDI_CAP.try_into().unwrap()));
-        dma.cselr.write(|w| w.c5s().map2());
-        dma.ccr5.write(|w| {
-            w.circ().set_bit().en().set_bit().minc().set_bit();
-            w.msize().bits8().psize().bits8()
-        });
-
-        dma.cpar4
-            .write(|w| unsafe { w.bits(&(*USART1::ptr()).tdr as *const _ as u32) });
-        dma.cmar4
-            .write(|w| unsafe { w.bits(&TX as *const _ as u32) });
-        dma.cselr.write(|w| w.c4s().map2());
-        dma.ccr4.write(|w| {
-            w.en().set_bit().minc().set_bit();
-            w.msize().bits8().psize().bits8().dir().set_bit()
-        });
-
-        let (k, (rx, tx)) = (0, unsafe { (&RX, &mut TX) });
-        Self { k, rx, tx }
+    fn new(rx: &'static [u8], tx: &'static mut [u8], dma1: DMA1, usart1: USART1) -> Self {
+        usart1.cr1.modify(|_, w| w.te().set_bit().re().set_bit());
+        usart1.brr.modify(|_, w| w.brr().bits(2560));
+        usart1.cr1.modify(|_, w| w.ue().set_bit());
+        while usart1.isr.read().teack().bit_is_clear() {}
+        while usart1.isr.read().reack().bit_is_clear() {}
+        usart1
+            .cr3
+            .modify(|_, w| w.dmar().set_bit().dmat().set_bit());
+        Self { k: 0, rx, tx, dma1 }
     }
 
     /// Reads the available MIDI bytes from DMA.
-    fn read(&mut self, dma: &DMA1, midi_in: &mut [u8]) -> usize {
-        let k = self.rx.len() - usize::from(dma.cndtr5.read().ndt().bits());
+    fn read(&mut self, midi_in: &mut [u8]) -> usize {
+        let k = self.rx.len() - usize::from(self.dma1.cndtr5.read().ndt().bits());
         let ret = match self.k.cmp(&k) {
             Ordering::Less => {
                 let o = k - self.k;
@@ -291,11 +362,11 @@ impl Midi {
     }
 
     /// Writes the midi bytes to DMA.
-    fn write_slice(&mut self, dma: &DMA1, midi_out: &[u8]) {
-        dma.ccr4.write(|w| w.en().clear_bit());
+    fn write_slice(&mut self, midi_out: &[u8]) {
+        let n = midi_out.len().try_into().unwrap();
         self.tx[..midi_out.len()].clone_from_slice(midi_out);
-        dma.cndtr4
-            .write(|w| w.ndt().bits(midi_out.len().try_into().unwrap()));
-        dma.ccr4.write(|w| w.en().set_bit());
+        self.dma1.ccr4.modify(|_, w| w.en().clear_bit());
+        self.dma1.cndtr4.modify(|_, w| w.ndt().bits(n));
+        self.dma1.ccr4.modify(|_, w| w.en().set_bit());
     }
 }
