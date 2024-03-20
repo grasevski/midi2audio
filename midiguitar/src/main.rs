@@ -162,13 +162,13 @@ mod app {
             k = 0;
         }
         midi.write_slice(&midi_out[..]);
-        defmt::println!(
-            "mi={} mo={} i={} o={}",
-            &midi_in[..n],
-            &midi_out[..],
-            audio_in,
-            audio_out
-        );
+        //defmt::println!(
+        //    "mi={} mo={} i={} o={}",
+        //    &midi_in[..n],
+        //    &midi_out[..],
+        //    audio_in,
+        //    audio_out
+        //);
     }
 }
 
