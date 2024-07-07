@@ -1,2 +1,2 @@
 # midiguitar
-Guitar midi controller + synthesizer using an STM32 Nucleo-L432KC
+Guitar midi controller + audio interface using an STM32H743ZI
