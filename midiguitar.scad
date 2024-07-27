@@ -1,9 +1,11 @@
-w = 51;
-d = 50;
+// translate([0, 0.5, pcbO]) import("midiguitarpcb.stl");
+
+w = 50;
+d = 51;
 h = 30;
 r = 2 * sqrt(2);
-wedgeW = 1.5;
-wedgeD = d + r;
+wedgeW = w + r;
+wedgeD = 1.5;
 wedgeH = 2;
 pcbO = 5;
 
@@ -17,8 +19,8 @@ difference() {
 			}
 		}
 	}
-	translate([wedgeW, 0, 0]) cube([w - 2 * wedgeW, d + r, h]);
+	translate([0, wedgeD, 0]) cube([w + r, d - 2 * wedgeD, h]);
 	translate([0, 0, pcbO]) cube([wedgeW, wedgeD, wedgeH]);
-	translate([w - wedgeW, 0, pcbO]) cube([wedgeW, wedgeD, wedgeH]);
-	translate([12, 0, 7 + pcbO + wedgeH]) rotate([90, 0, 0]) cylinder(d = 12, h = r);
+	translate([0, d - wedgeD, pcbO]) cube([wedgeW, wedgeD, wedgeH]);
+	translate([0, d - 12.5, 8 + pcbO + wedgeH]) rotate([0, -90, 0]) cylinder(d = 12, h = r);
 }

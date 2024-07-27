@@ -1,6 +1,6 @@
 [submodule "CMSIS-DSP"]
-	path = CMSIS-DSP
+	path = src/fastf0nls/CMSIS-DSP
 	url = https://github.com/ARM-software/CMSIS-DSP.git
 [submodule "CMSIS_5"]
-	path = CMSIS_5
+	path = src/fastf0nls/CMSIS_5
 	url = https://github.com/ARM-software/CMSIS_5.git

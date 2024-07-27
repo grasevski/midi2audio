@@ -19,5 +19,5 @@ struct midiguitar {
 
 /// Converts audio to midi.
 uint8_t midiguitar(struct midiguitar *midiguitar,
-                   const uint32_t input[AUDIO_CAP], uint16_t k,
+                   const volatile uint32_t input[AUDIO_CAP], uint16_t k,
                    uint8_t output[MIDI_CAP]);

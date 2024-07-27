@@ -55,9 +55,9 @@ int main() {
   for (;;) {
     n = read(0, inbuf + k, sizeof(inbuf) - k);
     if (n <= 0) {
-      if (k < sizeof(inbuf) >> 1)
+      if (k < sizeof(inbuf))
         break;
-      for (k = 0; k < AUDIO_CAP >> 1; ++k)
+      for (k = 0; k < AUDIO_CAP; ++k)
         input[k] = parse(inbuf + 3 * k);
       n = midiguitar(&mg, input, 0, output);
       n = audio2midi(buf + len, sizeof(buf) - len, dt, output, n);
@@ -76,15 +76,6 @@ int main() {
     for (k = 0; k < AUDIO_CAP; ++k)
       input[k] = parse(inbuf + 3 * k);
     n = midiguitar(&mg, input, 0, output);
-    n = audio2midi(buf + len, sizeof(buf) - len, dt, output, n);
-    if (n < 0)
-      return n;
-    else if (n) {
-      len += n;
-      dt = 0;
-    }
-    ++dt;
-    n = midiguitar(&mg, input, AUDIO_CAP >> 1, output);
     n = audio2midi(buf + len, sizeof(buf) - len, dt, output, n);
     if (n < 0)
       return n;

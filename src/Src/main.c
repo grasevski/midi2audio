@@ -18,11 +18,11 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
-#include "usb_device.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "midiguitar.h"
+#include <string.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -51,8 +51,10 @@ OPAMP_HandleTypeDef hopamp1;
 UART_HandleTypeDef huart1;
 DMA_HandleTypeDef hdma_usart1_tx;
 
-/* USER CODE BEGIN PV */
+PCD_HandleTypeDef hpcd_USB_OTG_FS;
 
+/* USER CODE BEGIN PV */
+volatile uint32_t input[AUDIO_CAP];
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -64,13 +66,25 @@ static void MX_ADC1_Init(void);
 static void MX_DAC1_Init(void);
 static void MX_OPAMP1_Init(void);
 static void MX_USART1_UART_Init(void);
+static void MX_USB_OTG_FS_PCD_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-
+void HAL_PCD_SOFCallback(PCD_HandleTypeDef *hpcd) {
+  enum { N = 48 };
+  static uint8_t pcm[N][4];
+  const uint16_t k = __HAL_DMA_GET_COUNTER(hadc1.DMA_Handle);
+  for (uint8_t i = 0; i < N; ++i) {
+    const uint32_t x = input[(2 * AUDIO_CAP - k - N + i) % AUDIO_CAP];
+    pcm[i][0] = (x >> 16) - 0x80;
+    pcm[i][1] = (x >> 8) & 0xff;
+    pcm[i][2] = x & 0xff;
+  }
+  HAL_PCD_EP_Transmit(hpcd, 1, (uint8_t *)pcm, sizeof(pcm));
+}
 /* USER CODE END 0 */
 
 /**
@@ -110,23 +124,31 @@ int main(void)
   MX_DAC1_Init();
   MX_OPAMP1_Init();
   MX_USART1_UART_Init();
-  MX_USB_DEVICE_Init();
+  MX_USB_OTG_FS_PCD_Init();
   /* USER CODE BEGIN 2 */
-  struct midiguitar mg = {};
-  uint32_t input[AUDIO_CAP];
-  uint8_t output[MIDI_CAP];
   HAL_DAC_SetValue(&hdac1, DAC_CHANNEL_1, DAC_ALIGN_8B_R, 0x80);
-  HAL_ADC_Start_DMA(&hadc1, input, AUDIO_CAP);
+  HAL_ADC_Start_DMA(&hadc1, (uint32_t *)input, AUDIO_CAP);
+  HAL_PCDEx_SetTxFiFo(&hpcd_USB_OTG_FS, 0, 0x40);
+  HAL_PCDEx_SetTxFiFo(&hpcd_USB_OTG_FS, 1, 0x80);
+  HAL_PCDEx_SetTxFiFo(&hpcd_USB_OTG_FS, 2, 0x80);
+  HAL_PCD_Start(&hpcd_USB_OTG_FS);
+  struct midiguitar mg = {};
+  uint8_t output[MIDI_CAP], usbOutput[MIDI_CAP];
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-  while (1)
-  {
+  while (1) {
     const uint16_t k = __HAL_DMA_GET_COUNTER(hadc1.DMA_Handle);
     const uint8_t n = midiguitar(&mg, input, AUDIO_CAP - k, output);
-    if (n)
+    if (n) {
       HAL_UART_Transmit_DMA(&huart1, output, n);
+      for (uint8_t i = 0; i < n / 3; ++i) {
+        usbOutput[4 * i] = output[3 * i] >> 4;
+        memcpy(usbOutput + 4 * i + 1, output + 3 * i, 3);
+      }
+      HAL_PCD_EP_Transmit(&hpcd_USB_OTG_FS, 2, usbOutput, n + n / 3);
+    }
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -398,6 +420,42 @@ static void MX_USART1_UART_Init(void)
   /* USER CODE BEGIN USART1_Init 2 */
 
   /* USER CODE END USART1_Init 2 */
+
+}
+
+/**
+  * @brief USB_OTG_FS Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USB_OTG_FS_PCD_Init(void)
+{
+
+  /* USER CODE BEGIN USB_OTG_FS_Init 0 */
+
+  /* USER CODE END USB_OTG_FS_Init 0 */
+
+  /* USER CODE BEGIN USB_OTG_FS_Init 1 */
+
+  /* USER CODE END USB_OTG_FS_Init 1 */
+  hpcd_USB_OTG_FS.Instance = USB_OTG_FS;
+  hpcd_USB_OTG_FS.Init.dev_endpoints = 9;
+  hpcd_USB_OTG_FS.Init.speed = PCD_SPEED_FULL;
+  hpcd_USB_OTG_FS.Init.dma_enable = ENABLE;
+  hpcd_USB_OTG_FS.Init.phy_itface = PCD_PHY_EMBEDDED;
+  hpcd_USB_OTG_FS.Init.Sof_enable = ENABLE;
+  hpcd_USB_OTG_FS.Init.low_power_enable = DISABLE;
+  hpcd_USB_OTG_FS.Init.lpm_enable = DISABLE;
+  hpcd_USB_OTG_FS.Init.battery_charging_enable = DISABLE;
+  hpcd_USB_OTG_FS.Init.vbus_sensing_enable = DISABLE;
+  hpcd_USB_OTG_FS.Init.use_dedicated_ep1 = ENABLE;
+  if (HAL_PCD_Init(&hpcd_USB_OTG_FS) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USB_OTG_FS_Init 2 */
+
+  /* USER CODE END USB_OTG_FS_Init 2 */
 
 }
 

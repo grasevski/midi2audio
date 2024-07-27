@@ -346,7 +346,7 @@ static float fastf0nls(const float x[SAMPLES]) {
 }
 
 uint8_t midiguitar(struct midiguitar *midiguitar,
-                   const uint32_t input[AUDIO_CAP], uint16_t k,
+                   const volatile uint32_t input[AUDIO_CAP], uint16_t k,
                    uint8_t output[MIDI_CAP]) {
   const uint16_t p = SAMPLES - AUDIO_CAP;
   while (midiguitar->len < k) {
