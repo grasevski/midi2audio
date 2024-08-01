@@ -3,13 +3,10 @@
 #include <string.h>
 #include <unistd.h>
 
-/// Converts the signed pcm value to a uint32_t.
-static uint32_t parse(const uint8_t x[]) {
-  uint32_t ret =
-      (uint32_t)x[0] | ((uint32_t)x[1] << 8) | ((uint32_t)x[2] << 16);
-  if (ret & 0x800000)
-    ret |= 0xff000000;
-  return (int32_t)ret + OFFSET;
+/// Converts the signed pcm value to a uint16_t.
+static void parse(uint16_t input[AUDIO_CAP]) {
+  for (uint16_t i = 0; i < AUDIO_CAP; ++i)
+    input[i] += OFFSET;
 }
 
 /// Writes midi to the given buffer along with a timestamp.
@@ -46,20 +43,19 @@ static int8_t audio2midi(uint8_t buf[], int32_t len, int32_t dt,
 }
 
 int main() {
+  static struct midiguitar mg;
+  static uint8_t buf[0x400000];
   int16_t n;
   int32_t k = 0, len = 0, dt = 0;
-  struct midiguitar mg = {};
-  uint32_t input[AUDIO_CAP];
-  uint8_t inbuf[3 * AUDIO_CAP], output[MIDI_CAP];
-  static uint8_t buf[0x400000];
+  uint8_t output[MIDI_CAP];
+  uint16_t input[AUDIO_CAP];
   for (;;) {
-    n = read(0, inbuf + k, sizeof(inbuf) - k);
+    n = read(0, (uint8_t *)input + k, sizeof(input) - k);
     if (n <= 0) {
-      if (k < sizeof(inbuf))
+      if (k < sizeof(input))
         break;
-      for (k = 0; k < AUDIO_CAP; ++k)
-        input[k] = parse(inbuf + 3 * k);
-      n = midiguitar(&mg, input, 0, output);
+      parse(input);
+      n = midiguitar(&mg, input, AUDIO_CAP, output);
       n = audio2midi(buf + len, sizeof(buf) - len, dt, output, n);
       if (n < 0)
         return n;
@@ -71,11 +67,10 @@ int main() {
       break;
     }
     k += n;
-    if (k < sizeof(inbuf))
+    if (k < sizeof(input))
       continue;
-    for (k = 0; k < AUDIO_CAP; ++k)
-      input[k] = parse(inbuf + 3 * k);
-    n = midiguitar(&mg, input, 0, output);
+    parse(input);
+    n = midiguitar(&mg, input, AUDIO_CAP, output);
     n = audio2midi(buf + len, sizeof(buf) - len, dt, output, n);
     if (n < 0)
       return n;

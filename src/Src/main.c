@@ -111,9 +111,9 @@ int main(void)
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
   HAL_DAC_SetValue(&hdac1, DAC_CHANNEL_1, DAC_ALIGN_8B_R, 0x80);
-  volatile uint32_t input[AUDIO_CAP];
+  volatile uint16_t input[AUDIO_CAP];
   HAL_ADC_Start_DMA(&hadc1, (uint32_t *)input, AUDIO_CAP);
-  struct midiguitar mg = {};
+  static struct midiguitar mg;
   uint8_t output[MIDI_CAP];
   /* USER CODE END 2 */
 
@@ -121,7 +121,7 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1) {
     const uint16_t k = __HAL_DMA_GET_COUNTER(hadc1.DMA_Handle);
-    const uint8_t n = midiguitar(&mg, input, AUDIO_CAP - k, output);
+    const uint8_t n = midiguitar(&mg, input, k, output);
     if (n)
       HAL_UART_Transmit_DMA(&huart1, output, n);
     /* USER CODE END WHILE */
@@ -229,10 +229,10 @@ static void MX_ADC1_Init(void)
   hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
   hadc1.Init.ConversionDataManagement = ADC_CONVERSIONDATA_DMA_CIRCULAR;
   hadc1.Init.Overrun = ADC_OVR_DATA_PRESERVED;
-  hadc1.Init.LeftBitShift = ADC_LEFTBITSHIFT_3;
+  hadc1.Init.LeftBitShift = ADC_LEFTBITSHIFT_NONE;
   hadc1.Init.OversamplingMode = ENABLE;
   hadc1.Init.Oversampling.Ratio = ADC3_OVERSAMPLING_RATIO_32;
-  hadc1.Init.Oversampling.RightBitShift = ADC_RIGHTBITSHIFT_NONE;
+  hadc1.Init.Oversampling.RightBitShift = ADC_RIGHTBITSHIFT_5;
   hadc1.Init.Oversampling.TriggeredMode = ADC_TRIGGEREDMODE_SINGLE_TRIGGER;
   hadc1.Init.Oversampling.OversamplingStopReset = ADC_REGOVERSAMPLING_CONTINUED_MODE;
   if (HAL_ADC_Init(&hadc1) != HAL_OK)

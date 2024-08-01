@@ -346,20 +346,22 @@ static float fastf0nls(const float x[SAMPLES]) {
 }
 
 uint8_t midiguitar(struct midiguitar *midiguitar,
-                   const volatile uint32_t input[AUDIO_CAP], uint16_t k,
+                   const volatile uint16_t input[AUDIO_CAP], uint16_t k,
                    uint8_t output[MIDI_CAP]) {
   const uint16_t p = SAMPLES - AUDIO_CAP;
+  if (k != AUDIO_CAP)
+    k = AUDIO_CAP - k;
   while (midiguitar->len < k) {
     if (!midiguitar->len)
-      memmove(midiguitar->input, midiguitar->input + AUDIO_CAP, p * sizeof(uint32_t));
-    int32_t x = input[midiguitar->len];
+      memmove(midiguitar->input, midiguitar->input + AUDIO_CAP, p * sizeof(float));
+    int16_t x = input[midiguitar->len];
     x -= OFFSET;
     midiguitar->input[p + midiguitar->len++] = (float)x / OFFSET;
-    midiguitar->arv += x < 0 ? -x - 1 : x;
+    midiguitar->arv += x < 0 ? -x : x;
   }
   if (midiguitar->len < AUDIO_CAP)
     return 0;
-  midiguitar->arv /= AUDIO_CAP << 15;
+  midiguitar->arv /= AUDIO_CAP << (LOG_OFFSET - 8);
   const float f = SAMPLE_RATE * fastf0nls(midiguitar->input) / (2 * M_PI);
   const uint32_t n =
       f <= 0 || f > 13289.75 ? 0 : PITCH_OFFSET * (69 + 12 * log2f(f / 440));
