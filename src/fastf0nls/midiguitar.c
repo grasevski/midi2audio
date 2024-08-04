@@ -348,15 +348,15 @@ static float fastf0nls(const float x[SAMPLES]) {
 uint8_t midiguitar(struct midiguitar *midiguitar,
                    const volatile uint16_t input[AUDIO_CAP], uint16_t k,
                    uint8_t output[MIDI_CAP]) {
-  const uint16_t p = SAMPLES - AUDIO_CAP;
+  enum { P = SAMPLES - AUDIO_CAP };
   if (k != AUDIO_CAP)
     k = AUDIO_CAP - k;
   while (midiguitar->len < k) {
     if (!midiguitar->len)
-      memmove(midiguitar->input, midiguitar->input + AUDIO_CAP, p * sizeof(float));
+      memmove(midiguitar->input, midiguitar->input + AUDIO_CAP, P * sizeof(float));
     int16_t x = input[midiguitar->len];
     x -= OFFSET;
-    midiguitar->input[p + midiguitar->len++] = (float)x / OFFSET;
+    midiguitar->input[P + midiguitar->len++] = (float)x / OFFSET;
     midiguitar->arv += x < 0 ? -x : x;
   }
   if (midiguitar->len < AUDIO_CAP)
