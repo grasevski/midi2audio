@@ -3,7 +3,7 @@
 w = 50;
 d = 51;
 h = 30;
-r = 2 * sqrt(2);
+r = 2;
 wedgeW = w + r;
 wedgeD = 1.5;
 wedgeH = 2;
@@ -14,7 +14,7 @@ difference() {
 		for (x = [0, w]) {
 			for (y = [0, d]) {
 				for (z = [0, h]) {
-					translate([x, y, z]) rotate([45, 45, 45]) cube(r, true);
+					translate([x, y, z]) rotate([0, 45, x > 0 != y > 0 ? -45 : 45]) cube(r, true);
 				}
 			}
 		}

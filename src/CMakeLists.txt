@@ -49,11 +49,19 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 # Add sources to executable
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user sources here
+    tinyusb/src/tusb.c
+    tinyusb/src/class/audio/audio_device.c
+    tinyusb/src/class/midi/midi_device.c
+    tinyusb/src/common/tusb_fifo.c
+    tinyusb/src/device/usbd.c
+    tinyusb/src/device/usbd_control.c
+    tinyusb/src/portable/synopsys/dwc2/dcd_dwc2.c
 )
 
 # Add include paths
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined include paths
+    tinyusb/src
     fastf0nls
 )
 
