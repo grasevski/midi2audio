@@ -18,10 +18,11 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "usb_device.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "tusb.h"
+#include "usbd_cdc_if.h"
 #include "midiguitar.h"
 /* USER CODE END Includes */
 
@@ -37,7 +38,7 @@ enum { ADC3_OVERSAMPLING_RATIO_32 = 0x10 };
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
-#define _PID_MAP(itf, n)  ( (CFG_TUD_##itf) << (n) )
+
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
@@ -51,10 +52,8 @@ OPAMP_HandleTypeDef hopamp1;
 UART_HandleTypeDef huart1;
 DMA_HandleTypeDef hdma_usart1_tx;
 
-PCD_HandleTypeDef hpcd_USB_OTG_FS;
-
 /* USER CODE BEGIN PV */
-volatile uint16_t input[AUDIO_CAP];
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -66,117 +65,13 @@ static void MX_ADC1_Init(void);
 static void MX_DAC1_Init(void);
 static void MX_OPAMP1_Init(void);
 static void MX_USART1_UART_Init(void);
-static void MX_USB_OTG_FS_PCD_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-bool tud_audio_tx_done_pre_load_cb(uint8_t rhport, uint8_t itf, uint8_t ep_in, uint8_t cur_alt_setting) {
-  (void) rhport;
-  (void) itf;
-  (void) ep_in;
-  (void) cur_alt_setting;
-  const uint16_t k = __HAL_DMA_GET_COUNTER(hadc1.DMA_Handle);
-  enum { N = 48 };
-  static uint16_t output[N];
-  for (uint8_t i = 0; i < N; ++i)
-    output[i] = input[((AUDIO_CAP << 1) - k - N + i) % AUDIO_CAP] + OFFSET;
-  tud_audio_write(output, sizeof(output));
-  return true;
-}
 
-const uint8_t* tud_descriptor_device_cb() {
-  enum {
-    USB_PID = 0x4000 | _PID_MAP(CDC, 0) | _PID_MAP(MSC, 1) | _PID_MAP(HID, 2) | _PID_MAP(MIDI, 3) | _PID_MAP(AUDIO, 4) | _PID_MAP(VENDOR, 5),
-  };
-  static const tusb_desc_device_t desc_device = {
-    .bLength = sizeof(tusb_desc_device_t),
-    .bDescriptorType = TUSB_DESC_DEVICE,
-    .bcdUSB = 0x0200,
-    .bDeviceClass = TUSB_CLASS_MISC,
-    .bDeviceSubClass = MISC_SUBCLASS_COMMON,
-    .bDeviceProtocol = MISC_PROTOCOL_IAD,
-    .bMaxPacketSize0 = CFG_TUD_ENDPOINT0_SIZE,
-    .idVendor = 0xcafe,
-    .idProduct = USB_PID,
-    .bcdDevice = 0x0100,
-    .iManufacturer = 0x01,
-    .iProduct = 0x02,
-    .iSerialNumber = 0x03,
-    .bNumConfigurations = 0x01,
-  };
-  return (const uint8_t*) &desc_device;
-}
-
-const uint8_t* tud_descriptor_configuration_cb(uint8_t index) {
-  (void) index;
-  enum {
-    CONFIG_TOTAL_LEN = TUD_CONFIG_DESC_LEN + TUD_MIDI_DESC_LEN + TUD_AUDIO_MIC_ONE_CH_DESC_LEN,
-  };
-  static const uint8_t desc_configuration[] = {
-    TUD_CONFIG_DESCRIPTOR(1, 2, 0, CONFIG_TOTAL_LEN, 0x00, 100),
-    TUD_MIDI_DESCRIPTOR(1, 0, 0x01, 0x81, 64),
-    TUD_AUDIO_MIC_ONE_CH_DESCRIPTOR(0, 0, 2, 16, 0x81, CFG_TUD_AUDIO_FUNC_1_EP_IN_SZ_MAX),
-  };
-  return desc_configuration;
-}
-
-const uint16_t* tud_descriptor_string_cb(uint8_t index, uint16_t langid) {
-  // String Descriptor Index
-  enum {
-    STRID_LANGID = 0,
-    STRID_MANUFACTURER,
-    STRID_PRODUCT,
-    STRID_SERIAL,
-  };
-  // array of pointer to string descriptors
-  static const char* string_desc_arr[] = {
-    (const char[]) { 0x09, 0x04 }, // 0: is supported language is English (0x0409)
-    "TinyUSB",                     // 1: Manufacturer
-    "TinyUSB Device",              // 2: Product
-    NULL,                          // 3: Serials will use unique ID if possible
-  };
-  static uint16_t _desc_str[32 + 1];
-  (void) langid;
-  size_t chr_count;
-
-  switch (index) {
-    case STRID_LANGID:
-      memcpy(&_desc_str[1], string_desc_arr[0], 2);
-      chr_count = 1;
-      break;
-
-    case STRID_SERIAL:
-      chr_count = board_usb_get_serial(_desc_str + 1, 32);
-      break;
-
-    default:
-      // Note: the 0xEE index string is a Microsoft OS 1.0 Descriptors.
-      // https://docs.microsoft.com/en-us/windows-hardware/drivers/usbcon/microsoft-defined-usb-descriptors
-
-      if ( !(index < sizeof(string_desc_arr) / sizeof(string_desc_arr[0])) ) return NULL;
-
-      const char *str = string_desc_arr[index];
-
-      // Cap at max char
-      chr_count = strlen(str);
-      size_t const max_count = sizeof(_desc_str) / sizeof(_desc_str[0]) - 1; // -1 for string type
-      if ( chr_count > max_count ) chr_count = max_count;
-
-      // Convert ASCII string into UTF-16
-      for ( size_t i = 0; i < chr_count; i++ ) {
-        _desc_str[1 + i] = str[i];
-      }
-      break;
-  }
-
-  // first byte is length (including header), second byte is string type
-  _desc_str[0] = (uint16_t) ((TUSB_DESC_STRING << 8) | (2 * chr_count + 2));
-
-  return _desc_str;
-}
 /* USER CODE END 0 */
 
 /**
@@ -216,24 +111,26 @@ int main(void)
   MX_DAC1_Init();
   MX_OPAMP1_Init();
   MX_USART1_UART_Init();
-  MX_USB_OTG_FS_PCD_Init();
+  MX_USB_DEVICE_Init();
   /* USER CODE BEGIN 2 */
   HAL_DAC_SetValue(&hdac1, DAC_CHANNEL_1, DAC_ALIGN_8B_R, 0x80);
+  volatile uint16_t input[AUDIO_CAP];
   HAL_ADC_Start_DMA(&hadc1, (uint32_t *)input, AUDIO_CAP);
   static struct midiguitar mg;
   uint8_t output[MIDI_CAP];
-  tusb_init();
+  uint16_t prev = 0;
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1) {
     const uint16_t k = __HAL_DMA_GET_COUNTER(hadc1.DMA_Handle);
+    if (k == AUDIO_CAP && prev != AUDIO_CAP)
+      CDC_Transmit_FS((uint8_t *)input, sizeof(input));
+    prev = k;
     const uint8_t n = midiguitar(&mg, input, k, output);
-    if (n) {
+    if (n)
       HAL_UART_Transmit_DMA(&huart1, output, n);
-      tud_midi_stream_write(0, output, n);
-    }
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -509,42 +406,6 @@ static void MX_USART1_UART_Init(void)
 }
 
 /**
-  * @brief USB_OTG_FS Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_USB_OTG_FS_PCD_Init(void)
-{
-
-  /* USER CODE BEGIN USB_OTG_FS_Init 0 */
-
-  /* USER CODE END USB_OTG_FS_Init 0 */
-
-  /* USER CODE BEGIN USB_OTG_FS_Init 1 */
-
-  /* USER CODE END USB_OTG_FS_Init 1 */
-  hpcd_USB_OTG_FS.Instance = USB_OTG_FS;
-  hpcd_USB_OTG_FS.Init.dev_endpoints = 9;
-  hpcd_USB_OTG_FS.Init.speed = PCD_SPEED_FULL;
-  hpcd_USB_OTG_FS.Init.dma_enable = ENABLE;
-  hpcd_USB_OTG_FS.Init.phy_itface = PCD_PHY_EMBEDDED;
-  hpcd_USB_OTG_FS.Init.Sof_enable = ENABLE;
-  hpcd_USB_OTG_FS.Init.low_power_enable = DISABLE;
-  hpcd_USB_OTG_FS.Init.lpm_enable = DISABLE;
-  hpcd_USB_OTG_FS.Init.battery_charging_enable = DISABLE;
-  hpcd_USB_OTG_FS.Init.vbus_sensing_enable = DISABLE;
-  hpcd_USB_OTG_FS.Init.use_dedicated_ep1 = DISABLE;
-  if (HAL_PCD_Init(&hpcd_USB_OTG_FS) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN USB_OTG_FS_Init 2 */
-
-  /* USER CODE END USB_OTG_FS_Init 2 */
-
-}
-
-/**
   * Enable DMA controller clock
   */
 static void MX_DMA_Init(void)
@@ -627,11 +488,11 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_Init(GPIOH, &GPIO_InitStruct);
 
   /*Configure GPIO pins : PA0 PA1 PA2 PA3
-                           PA5 PA6 PA9 PA10
-                           PA13 PA14 PA15 */
+                           PA5 PA6 PA8 PA9
+                           PA10 PA13 PA14 PA15 */
   GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3
-                          |GPIO_PIN_5|GPIO_PIN_6|GPIO_PIN_9|GPIO_PIN_10
-                          |GPIO_PIN_13|GPIO_PIN_14|GPIO_PIN_15;
+                          |GPIO_PIN_5|GPIO_PIN_6|GPIO_PIN_8|GPIO_PIN_9
+                          |GPIO_PIN_10|GPIO_PIN_13|GPIO_PIN_14|GPIO_PIN_15;
   GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);

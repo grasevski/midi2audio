@@ -56,7 +56,7 @@ ENTRY(Reset_Handler)
 _estack = ORIGIN(RAM_D1) + LENGTH(RAM_D1);    /* end of RAM */
 /* Generate a link error if heap and stack don't fit into RAM */
 _Min_Heap_Size = 0x200;      /* required amount of heap  */
-_Min_Stack_Size = 0x7e6d0; /* required amount of stack */
+_Min_Stack_Size = 0x70000; /* required amount of stack */
 
 /* Specify the memory areas */
 MEMORY
@@ -147,7 +147,7 @@ SECTIONS
 
     . = ALIGN(4);
     _edata = .;        /* define a global symbol at data end */
-  } >DTCMRAM AT> FLASH
+  } >RAM_D1 AT> FLASH
 
   
   /* Uninitialized data section */
