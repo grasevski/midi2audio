@@ -37,16 +37,13 @@ static void update_ls_sol(int order, int nPitches, int nPitchesOld, bool add,
 static void compute(const float x[SAMPLES], float omega_0h[MAX_MODEL_ORDER]) {
   float dftData[MP << 1];
   {
-    arm_rfft_instance_q31 fft;
-    FFT_INIT(&fft, 0, 1);
-    q31_t p[N_FFT_GRID], p1[N_FFT_GRID << 1];
-    arm_float_to_q31(x, p, SAMPLES);
-    arm_fill_q31(0, p + SAMPLES, N_FFT_GRID - SAMPLES);
-    arm_rfft_q31(&fft, p, p1);
-    float p2[N_FFT_GRID << 1];
-    arm_q31_to_float(p1, p2, N_FFT_GRID << 1);
-    arm_scale_f32(p2, N_FFT_GRID, p2, N_FFT_GRID << 1);
-    arm_cmplx_mult_cmplx_f32(FFT_SHIFT_VECTOR, p2, dftData, MP);
+    arm_rfft_fast_instance_f32 fft;
+    FFT_INIT(&fft);
+    float p[N_FFT_GRID], p1[N_FFT_GRID + 2];
+    memcpy(p, x, SAMPLES * sizeof(float));
+    bzero(p + SAMPLES, (N_FFT_GRID - SAMPLES) * sizeof(float));
+    arm_rfft_fast_f32(&fft, p, p1, 0);
+    arm_cmplx_mult_real_f32(FFT_SHIFT_VECTOR, p1, dftData, MP);
   }
   float lsSol1[MP], lsSol2[MP];
   int maxFftIndex = MAX_FFT_INDEX, nPitches = MAX_FFT_INDEX - MIN_FFT_INDEX + 1;
@@ -348,21 +345,28 @@ static float fastf0nls(const float x[SAMPLES]) {
 uint8_t midiguitar(struct midiguitar *midiguitar,
                    const volatile uint16_t input[AUDIO_CAP], uint16_t k,
                    uint8_t output[MIDI_CAP]) {
-  enum { P = SAMPLES - AUDIO_CAP };
+  enum { Q = AUDIO_CAP >> LOG_SAMPLE_DIVISOR };
+  enum { P = SAMPLES - Q };
+  enum { SAMPLE_DIVISOR = 1 << LOG_SAMPLE_DIVISOR };
   if (k != AUDIO_CAP)
     k = AUDIO_CAP - k;
-  while (midiguitar->len < k) {
+  while (midiguitar->len + SAMPLE_DIVISOR - 1 < k) {
     if (!midiguitar->len)
-      memmove(midiguitar->input, midiguitar->input + AUDIO_CAP, P * sizeof(float));
-    int16_t x = input[midiguitar->len];
-    x -= OFFSET;
-    midiguitar->input[P + midiguitar->len++] = (float)x / OFFSET;
+      memmove(midiguitar->input, midiguitar->input + Q, P * sizeof(float));
+    int32_t x = 0;
+    for (int8_t i = 0; i < SAMPLE_DIVISOR; ++i)
+      x += input[midiguitar->len + i] - OFFSET;
+    x >>= LOG_SAMPLE_DIVISOR;
+    midiguitar->input[P + (midiguitar->len >> LOG_SAMPLE_DIVISOR)] =
+        (float)x / OFFSET;
     midiguitar->arv += x < 0 ? -x : x;
+    midiguitar->len += SAMPLE_DIVISOR;
   }
   if (midiguitar->len < AUDIO_CAP)
     return 0;
   midiguitar->arv /= AUDIO_CAP << (LOG_OFFSET - 8);
-  const float f = SAMPLE_RATE * fastf0nls(midiguitar->input) / (2 * M_PI);
+  const float f = (SAMPLE_RATE >> LOG_SAMPLE_DIVISOR) *
+                  fastf0nls(midiguitar->input) / (2 * M_PI);
   const uint32_t n =
       f <= 0 || f > 13289.75 ? 0 : PITCH_OFFSET * (69 + 12 * log2f(f / 440));
   const uint8_t note = n >> LOG_NUM_BENDS;
